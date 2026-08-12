@@ -1,0 +1,12 @@
+[Unit]
+Description=Arvaz API
+After=network.target postgresql.service docker.service
+
+[Service]
+User=cloud-admin
+EnvironmentFile=/etc/arvaz-api/env
+ExecStart=/usr/local/bin/arvaz-api
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

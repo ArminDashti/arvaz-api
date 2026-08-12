@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: arvaz-postgres
+    environment:
+      POSTGRES_USER: arvaz
+      POSTGRES_PASSWORD: arvaz
+      POSTGRES_DB: arvaz
+    ports:
+      - "55433:5432"
+    volumes:
+      - ./.armin/docker-data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arvaz -d arvaz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

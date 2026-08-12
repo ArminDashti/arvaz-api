@@ -1,0 +1,43 @@
+# Binaries
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/server
+/arvaz-api
+
+# Test / coverage
+*.test
+*.out
+coverage.html
+
+# Env & secrets
+.env
+.env.local
+*.pem
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Docker volumes
+.armin/docker-data/
+
+# Cursor local hook state
+.cursor/hooks/state/
+
+# === auto-managed large files (>5MB) ===
+
+# BEGIN AUTO-MANAGED LARGE FILES (>5MB)
+# END AUTO-MANAGED LARGE FILES
+
+# === auto-managed large files (github-commit-push-all) ===
+# auto-managed-large-files
+arvaz-api.exe
+.armin/docker-data/postgres/pg_wal/000000010000000000000001
