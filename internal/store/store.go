@@ -27,30 +27,12 @@ type User struct {
 }
 
 type UserStat struct {
-	Username             string  `json:"username"`
-	DownloadBytes        uint64  `json:"downloadBytes"`
-	UploadBytes          uint64  `json:"uploadBytes"`
-	UsageDurationSeconds int64   `json:"usageDurationSeconds"`
-	ConnectedIpCount     int64   `json:"connectedIpCount"`
-}
-
-type SessionLog struct {
-	Username        string     `json:"username"`
-	ConnectedAt     time.Time  `json:"connectedAt"`
-	DisconnectedAt  *time.Time `json:"disconnectedAt"`
-	ClientIP        string     `json:"clientIp"`
-	ASN             *string    `json:"asn"`
-	DownloadBytes   uint64     `json:"downloadBytes"`
-	UploadBytes     uint64     `json:"uploadBytes"`
-	DurationSeconds int64      `json:"durationSeconds"`
-}
-
-type SoftEtherStats struct {
-	OnlineCount      int    `json:"onlineCount"`
-	UniqueUsers      int    `json:"uniqueUsers"`
-	TotalDownloadBytes uint64 `json:"totalDownloadBytes"`
-	TotalUploadBytes   uint64 `json:"totalUploadBytes"`
-	TopUsers         []UserStat `json:"topUsers"`
+	Username             string `json:"username"`
+	ClientIP             string `json:"clientIp"`
+	ASN                  string `json:"asn"`
+	DownloadBytes        uint64 `json:"downloadBytes"`
+	UploadBytes          uint64 `json:"uploadBytes"`
+	UsageDurationSeconds int64  `json:"usageDurationSeconds"`
 }
 
 func Connect(ctx context.Context, databaseURL string) (*Store, error) {
@@ -122,11 +104,13 @@ func (s *Store) SyncOnlineSessions(ctx context.Context, sessions []softether.Onl
 
 	onlineKeys := make([]string, 0, len(sessions))
 	for _, sess := range sessions {
-		onlineKeys = append(onlineKeys, sess.SessionKey)
-		asn := ""
-		if sess.ASN != nil {
-			asn = *sess.ASN
+		key := sess.SessionKey
+		if key == "" {
+			key = sess.Username + "|" + sess.ClientIP + "|" + sess.SessionName
 		}
+		onlineKeys = append(onlineKeys, key)
+
+		asn := sess.LastASN
 		connected := time.Now().UTC()
 		if sess.ConnectedAt != nil {
 			connected = *sess.ConnectedAt
@@ -141,9 +125,9 @@ func (s *Store) SyncOnlineSessions(ctx context.Context, sessions []softether.Onl
 				upload_bytes = EXCLUDED.upload_bytes,
 				duration_seconds = EXCLUDED.duration_seconds,
 				client_ip = EXCLUDED.client_ip,
-				asn = EXCLUDED.asn
+				asn = COALESCE(EXCLUDED.asn, softether_sessions.asn)
 		`, sess.Username, sess.ClientIP, nullIfEmpty(asn), int64(sess.DownloadBytes), int64(sess.UploadBytes),
-			connected, sess.SessionDurationSeconds, sess.SessionKey)
+			connected, sess.SessionDurationSeconds, key)
 		if err != nil {
 			return err
 		}
@@ -153,7 +137,7 @@ func (s *Store) SyncOnlineSessions(ctx context.Context, sessions []softether.Onl
 				username, client_ip, asn, download_bytes, upload_bytes, usage_duration_seconds, updated_at
 			) VALUES ($1,$2,$3,$4,$5,$6,NOW())
 			ON CONFLICT (username) DO UPDATE SET
-				client_ip = EXCLUDED.client_ip,
+				client_ip = CASE WHEN EXCLUDED.client_ip <> '' THEN EXCLUDED.client_ip ELSE softether_user_stats.client_ip END,
 				asn = COALESCE(EXCLUDED.asn, softether_user_stats.asn),
 				download_bytes = GREATEST(softether_user_stats.download_bytes, EXCLUDED.download_bytes),
 				upload_bytes = GREATEST(softether_user_stats.upload_bytes, EXCLUDED.upload_bytes),
@@ -189,17 +173,9 @@ func (s *Store) SyncOnlineSessions(ctx context.Context, sessions []softether.Onl
 
 func (s *Store) ListUserStats(ctx context.Context) ([]UserStat, error) {
 	rows, err := s.pool.Query(ctx, `
-		SELECT u.username,
-		       u.download_bytes,
-		       u.upload_bytes,
-		       u.usage_duration_seconds,
-		       COALESCE((
-		           SELECT COUNT(DISTINCT s.client_ip)
-		           FROM softether_sessions s
-		           WHERE s.username = u.username AND s.client_ip IS NOT NULL AND s.client_ip <> ''
-		       ), 0)
-		FROM softether_user_stats u
-		ORDER BY u.username
+		SELECT username, COALESCE(client_ip,''), COALESCE(asn,''), download_bytes, upload_bytes, usage_duration_seconds
+		FROM softether_user_stats
+		ORDER BY username
 	`)
 	if err != nil {
 		return nil, err
@@ -208,7 +184,7 @@ func (s *Store) ListUserStats(ctx context.Context) ([]UserStat, error) {
 	out := []UserStat{}
 	for rows.Next() {
 		var u UserStat
-		if err := rows.Scan(&u.Username, &u.DownloadBytes, &u.UploadBytes, &u.UsageDurationSeconds, &u.ConnectedIpCount); err != nil {
+		if err := rows.Scan(&u.Username, &u.ClientIP, &u.ASN, &u.DownloadBytes, &u.UploadBytes, &u.UsageDurationSeconds); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
@@ -216,69 +192,16 @@ func (s *Store) ListUserStats(ctx context.Context) ([]UserStat, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) ListAllSessionLogs(ctx context.Context, limit int) ([]SessionLog, error) {
-	if limit <= 0 {
-		limit = 500
-	}
-	rows, err := s.pool.Query(ctx, `
-		SELECT username, connected_at, disconnected_at, COALESCE(client_ip,''), asn,
-		       download_bytes, upload_bytes, duration_seconds
-		FROM softether_sessions
-		ORDER BY connected_at DESC
-		LIMIT $1
-	`, limit)
+func (s *Store) GetUserStatMap(ctx context.Context) (map[string]UserStat, error) {
+	stats, err := s.ListUserStats(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []SessionLog{}
-	for rows.Next() {
-		var sLog SessionLog
-		var asn *string
-		if err := rows.Scan(&sLog.Username, &sLog.ConnectedAt, &sLog.DisconnectedAt, &sLog.ClientIP, &asn,
-			&sLog.DownloadBytes, &sLog.UploadBytes, &sLog.DurationSeconds); err != nil {
-			return nil, err
-		}
-		sLog.ASN = asn
-		out = append(out, sLog)
+	out := make(map[string]UserStat, len(stats))
+	for _, st := range stats {
+		out[st.Username] = st
 	}
-	return out, rows.Err()
-}
-
-func (s *Store) SoftEtherStats(ctx context.Context, onlineCount int) (*SoftEtherStats, error) {
-	stats := &SoftEtherStats{OnlineCount: onlineCount}
-	err := s.pool.QueryRow(ctx, `
-		SELECT COUNT(DISTINCT username),
-		       COALESCE(SUM(download_bytes), 0),
-		       COALESCE(SUM(upload_bytes), 0)
-		FROM softether_user_stats
-	`).Scan(&stats.UniqueUsers, &stats.TotalDownloadBytes, &stats.TotalUploadBytes)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := s.pool.Query(ctx, `
-		SELECT username, download_bytes, upload_bytes, usage_duration_seconds,
-		       COALESCE((
-		           SELECT COUNT(DISTINCT s.client_ip)
-		           FROM softether_sessions s
-		           WHERE s.username = u.username AND s.client_ip IS NOT NULL AND s.client_ip <> ''
-		       ), 0)
-		FROM softether_user_stats u
-		ORDER BY (download_bytes + upload_bytes) DESC
-		LIMIT 10
-	`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var u UserStat
-		if err := rows.Scan(&u.Username, &u.DownloadBytes, &u.UploadBytes, &u.UsageDurationSeconds, &u.ConnectedIpCount); err != nil {
-			return nil, err
-		}
-		stats.TopUsers = append(stats.TopUsers, u)
-	}
-	return stats, rows.Err()
+	return out, nil
 }
 
 func nullIfEmpty(s string) *string {

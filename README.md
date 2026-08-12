@@ -1,26 +1,13 @@
-# Arvaz API
+# arvaz-api
 
-Host monitoring backend for Irancell-T3: Gin, PostgreSQL, Docker, SoftEther, filesystem explorer.
+Host ops API for Irancell-T3: Gin, PostgreSQL auth, Docker containers inventory, Mullvad controls via `docker exec`.
 
-## Stack
+## Features
 
-- Go + Gin
-- PostgreSQL (pgx)
-- gopsutil (CPU, memory, disk, network)
-- Docker CLI + SoftEther vpncmd via `docker exec`
+- JWT login (`armin` / configured default password)
+- `GET /api/v1/docker/containers` — stack, CPU, memory, network name+IP, HAProxy URL, uptime, state
+- Mullvad status, relay list, set relay, anti-censorship, ping, Ookla-compatible speedtest
 
-## Local dev
+## Safety
 
-```bash
-docker compose up -d
-cp .env.example .env
-go run ./cmd/server
-```
-
-Default login (seeded): `armin` / `dopadopa1234`
-
-API: `http://127.0.0.1:8090`
-
-## Production (T3)
-
-Native systemd install — **not** Docker. See `deploy/arvaz-api.service` and `deploy/env.example`.
+Never restarts SoftEther / Mullvad. Mullvad write actions are operator-initiated only.

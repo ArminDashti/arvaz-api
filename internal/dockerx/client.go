@@ -6,201 +6,207 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
 
-type ImageInfo struct {
-	ID        string    `json:"id"`
-	Tags      []string  `json:"tags"`
-	SizeBytes int64     `json:"sizeBytes"`
-	CreatedAt time.Time `json:"createdAt"`
-}
-
 type ContainerInfo struct {
-	ContainerName     string  `json:"containerName"`
-	Image             string  `json:"image"`
-	UptimeSeconds     int64   `json:"uptimeSeconds"`
-	MemoryBytes       uint64  `json:"memoryBytes"`
-	DiskBytes         uint64  `json:"diskBytes"`
-	CPUPercent        float64 `json:"cpuPercent"`
-	InternalEndpoint  string  `json:"internalEndpoint"`
-	ReverseProxyRoute string  `json:"reverseProxyRoute"`
-	StackName         string  `json:"stackName"`
-	State             string  `json:"state"`
+	StackName     string  `json:"stackName"`
+	ContainerName string  `json:"containerName"`
+	CPUPercent    float64 `json:"cpuPercent"`
+	MemoryBytes   uint64  `json:"memoryBytes"`
+	MemoryGB      float64 `json:"memoryGb"`
+	Network       string  `json:"network"`
+	HAProxyURL    string  `json:"haproxyUrl"`
+	UptimeSeconds int64   `json:"uptimeSeconds"`
+	State         string  `json:"state"`
 }
 
-type StackGroup struct {
-	StackName  string          `json:"stackName"`
-	Containers []ContainerInfo `json:"containers"`
+type Client struct {
+	PublicIP          string
+	HAProxyConfigPath string
 }
 
-type Client struct{}
-
-func New() (*Client, error) {
+func New(publicIP, haproxyConfigPath string) (*Client, error) {
 	if err := exec.Command("docker", "version").Run(); err != nil {
 		return nil, fmt.Errorf("docker unavailable: %w", err)
 	}
-	return &Client{}, nil
+	return &Client{PublicIP: publicIP, HAProxyConfigPath: haproxyConfigPath}, nil
 }
 
 func (c *Client) Close() error { return nil }
 
-func (c *Client) ListImages(ctx context.Context) ([]ImageInfo, error) {
-	out, err := runDocker(ctx, "images", "--format", "{{json .}}")
+func (c *Client) ListContainers(ctx context.Context) ([]ContainerInfo, error) {
+	idsOut, err := runDocker(ctx, "ps", "-aq")
 	if err != nil {
 		return nil, err
 	}
-	lines := splitLines(out)
-	result := make([]ImageInfo, 0, len(lines))
-	for _, line := range lines {
-		var row struct {
-			ID         string `json:"ID"`
-			Repository string `json:"Repository"`
-			Tag        string `json:"Tag"`
-			Size       string `json:"Size"`
-			CreatedAt  string `json:"CreatedAt"`
-		}
-		if err := json.Unmarshal([]byte(line), &row); err != nil {
-			continue
-		}
-		tag := row.Repository
-		if row.Tag != "" {
-			tag = row.Repository + ":" + row.Tag
-		}
-		result = append(result, ImageInfo{
-			ID:        row.ID,
-			Tags:      []string{tag},
-			SizeBytes: parseDockerSize(row.Size),
-			CreatedAt: parseDockerTime(row.CreatedAt),
-		})
+	ids := splitLines(idsOut)
+	if len(ids) == 0 {
+		return []ContainerInfo{}, nil
 	}
-	return result, nil
-}
 
-func (c *Client) ListContainersByStack(ctx context.Context) ([]StackGroup, error) {
-	out, err := runDocker(ctx, "ps", "-a", "--format", "{{json .}}")
+	args := append([]string{"inspect"}, ids...)
+	raw, err := runDocker(ctx, args...)
 	if err != nil {
 		return nil, err
 	}
-	lines := splitLines(out)
-	groups := map[string][]ContainerInfo{}
-	order := []string{}
 
-	for _, line := range lines {
-		var row struct {
-			ID      string `json:"ID"`
-			Names   string `json:"Names"`
-			Image   string `json:"Image"`
-			Status  string `json:"Status"`
-			State   string `json:"State"`
-			Ports   string `json:"Ports"`
-			Labels  string `json:"Labels"`
-			RunningFor string `json:"RunningFor"`
-		}
-		if err := json.Unmarshal([]byte(line), &row); err != nil {
-			continue
-		}
-		labels := parseLabels(row.Labels)
-		stack := labels["com.docker.compose.project"]
+	var inspected []inspectRow
+	if err := json.Unmarshal([]byte(raw), &inspected); err != nil {
+		return nil, fmt.Errorf("docker inspect parse: %w", err)
+	}
+
+	statsByName := collectAllStats(ctx)
+	routes := ParseHAProxyRoutes(c.HAProxyConfigPath)
+	now := time.Now().UTC()
+
+	result := make([]ContainerInfo, 0, len(inspected))
+	for _, row := range inspected {
+		name := strings.TrimPrefix(row.Name, "/")
+		stack := row.Config.Labels["com.docker.compose.project"]
 		if stack == "" {
-			stack = labels["com.docker.stack.namespace"]
+			stack = row.Config.Labels["com.docker.stack.namespace"]
 		}
 		if stack == "" {
 			stack = "standalone"
 		}
-		route := firstNonEmpty(labels["arvaz.proxy.host"], labels["arvaz.reverse_proxy"], labels["haproxy.host"])
 
-		memBytes, cpuPct := containerStats(ctx, row.ID)
-		info := ContainerInfo{
-			ContainerName:     row.Names,
-			Image:             row.Image,
-			UptimeSeconds:     parseRunningFor(row.RunningFor, row.Status),
-			MemoryBytes:       memBytes,
-			DiskBytes:         0,
-			CPUPercent:        cpuPct,
-			InternalEndpoint:  firstPort(row.Ports),
-			ReverseProxyRoute: route,
-			StackName:         stack,
-			State:             row.State,
+		state := row.State.Status
+		uptime := int64(0)
+		if row.State.Running {
+			if t, err := time.Parse(time.RFC3339Nano, row.State.StartedAt); err == nil {
+				uptime = int64(now.Sub(t.UTC()).Seconds())
+			}
 		}
-		if _, ok := groups[stack]; !ok {
-			order = append(order, stack)
+
+		cpu := 0.0
+		mem := uint64(0)
+		if s, ok := statsByName[name]; ok {
+			cpu = s.cpu
+			mem = s.mem
 		}
-		groups[stack] = append(groups[stack], info)
+
+		network := formatNetworks(row.NetworkSettings.Networks)
+		haproxy := routes[name]
+		if haproxy == "" {
+			haproxy = publishedHostPort(row.NetworkSettings.Ports, c.PublicIP)
+		}
+		if haproxy == "" {
+			haproxy = "-"
+		}
+
+		result = append(result, ContainerInfo{
+			StackName:     stack,
+			ContainerName: name,
+			CPUPercent:    round2(cpu),
+			MemoryBytes:   mem,
+			MemoryGB:      round2(float64(mem) / (1024 * 1024 * 1024)),
+			Network:       network,
+			HAProxyURL:    haproxy,
+			UptimeSeconds: uptime,
+			State:         state,
+		})
 	}
 
-	outGroups := make([]StackGroup, 0, len(order))
-	for _, name := range order {
-		outGroups = append(outGroups, StackGroup{StackName: name, Containers: groups[name]})
-	}
-	return outGroups, nil
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].StackName == result[j].StackName {
+			return result[i].ContainerName < result[j].ContainerName
+		}
+		return result[i].StackName < result[j].StackName
+	})
+	return result, nil
 }
 
-func (c *Client) ListContainersFlat(ctx context.Context) ([]ContainerInfo, error) {
-	stacks, err := c.ListContainersByStack(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]ContainerInfo, 0)
-	for _, stack := range stacks {
-		for _, container := range stack.Containers {
-			out = append(out, container)
-		}
-	}
-	return out, nil
+type inspectRow struct {
+	Name            string `json:"Name"`
+	Config          struct {
+		Labels map[string]string `json:"Labels"`
+	} `json:"Config"`
+	State struct {
+		Status    string `json:"Status"`
+		Running   bool   `json:"Running"`
+		StartedAt string `json:"StartedAt"`
+	} `json:"State"`
+	NetworkSettings struct {
+		Networks map[string]struct {
+			IPAddress string `json:"IPAddress"`
+		} `json:"Networks"`
+		Ports map[string][]struct {
+			HostIP   string `json:"HostIp"`
+			HostPort string `json:"HostPort"`
+		} `json:"Ports"`
+	} `json:"NetworkSettings"`
 }
 
-func (c *Client) Overview(ctx context.Context) (map[string]any, error) {
-	containers, err := c.ListContainersFlat(ctx)
-	if err != nil {
-		return nil, err
-	}
-	images, err := c.ListImages(ctx)
-	if err != nil {
-		return nil, err
-	}
-	running, stopped := 0, 0
-	for _, ctn := range containers {
-		if strings.EqualFold(ctn.State, "running") {
-			running++
-		} else {
-			stopped++
-		}
-	}
-	var totalImageSize int64
-	for _, img := range images {
-		totalImageSize += img.SizeBytes
-	}
-	return map[string]any{
-		"runningCount":     running,
-		"stoppedCount":     stopped,
-		"imagesCount":      len(images),
-		"totalImageSizeBytes": totalImageSize,
-		"containersCount":  len(containers),
-	}, nil
+type containerStat struct {
+	cpu float64
+	mem uint64
 }
 
-func containerStats(ctx context.Context, id string) (uint64, float64) {
-	out, err := runDocker(ctx, "stats", "--no-stream", "--format", "{{json .}}", id)
+func collectAllStats(ctx context.Context) map[string]containerStat {
+	out, err := runDocker(ctx, "stats", "--no-stream", "--format", "{{json .}}")
 	if err != nil {
-		return 0, 0
+		return map[string]containerStat{}
 	}
-	line := strings.TrimSpace(out)
-	if line == "" {
-		return 0, 0
+	result := map[string]containerStat{}
+	for _, line := range splitLines(out) {
+		var row struct {
+			Name     string `json:"Name"`
+			MemUsage string `json:"MemUsage"`
+			CPUPerc  string `json:"CPUPerc"`
+		}
+		if err := json.Unmarshal([]byte(line), &row); err != nil {
+			continue
+		}
+		cpu, _ := strconv.ParseFloat(strings.TrimSuffix(strings.TrimSpace(row.CPUPerc), "%"), 64)
+		result[row.Name] = containerStat{cpu: cpu, mem: parseMemUsage(row.MemUsage)}
 	}
-	var row struct {
-		MemUsage string `json:"MemUsage"`
-		CPUPerc  string `json:"CPUPerc"`
+	return result
+}
+
+func formatNetworks(networks map[string]struct {
+	IPAddress string `json:"IPAddress"`
+}) string {
+	if len(networks) == 0 {
+		return "-"
 	}
-	if err := json.Unmarshal([]byte(line), &row); err != nil {
-		return 0, 0
+	names := make([]string, 0, len(networks))
+	for name := range networks {
+		names = append(names, name)
 	}
-	mem := parseMemUsage(row.MemUsage)
-	cpu, _ := strconv.ParseFloat(strings.TrimSuffix(strings.TrimSpace(row.CPUPerc), "%"), 64)
-	return mem, cpu
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		ip := strings.TrimSpace(networks[name].IPAddress)
+		if ip == "" {
+			parts = append(parts, name)
+			continue
+		}
+		parts = append(parts, name+" "+ip)
+	}
+	return strings.Join(parts, ", ")
+}
+
+func publishedHostPort(ports map[string][]struct {
+	HostIP   string `json:"HostIp"`
+	HostPort string `json:"HostPort"`
+}, publicIP string) string {
+	for _, bindings := range ports {
+		for _, b := range bindings {
+			if b.HostPort == "" {
+				continue
+			}
+			host := b.HostIP
+			if host == "" || host == "0.0.0.0" || host == "::" {
+				host = publicIP
+			}
+			return host + ":" + b.HostPort
+		}
+	}
+	return ""
 }
 
 func runDocker(ctx context.Context, args ...string) (string, error) {
@@ -213,7 +219,7 @@ func runDocker(ctx context.Context, args ...string) (string, error) {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return "", fmt.Errorf(msg)
+		return "", fmt.Errorf("%s", msg)
 	}
 	return stdout.String(), nil
 }
@@ -230,59 +236,7 @@ func splitLines(s string) []string {
 	return out
 }
 
-func parseLabels(raw string) map[string]string {
-	out := map[string]string{}
-	for _, part := range strings.Split(raw, ",") {
-		kv := strings.SplitN(part, "=", 2)
-		if len(kv) == 2 {
-			out[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
-		}
-	}
-	return out
-}
-
-func firstPort(ports string) string {
-	ports = strings.TrimSpace(ports)
-	if ports == "" {
-		return ""
-	}
-	return strings.Split(ports, ", ")[0]
-}
-
-func parseRunningFor(runningFor, status string) int64 {
-	src := runningFor
-	if src == "" {
-		src = status
-	}
-	src = strings.ToLower(src)
-	src = strings.TrimPrefix(src, "up ")
-	// best-effort; leave 0 if unknown
-	_ = src
-	return 0
-}
-
-func parseDockerSize(s string) int64 {
-	s = strings.TrimSpace(strings.ToUpper(s))
-	mult := float64(1)
-	switch {
-	case strings.HasSuffix(s, "GB"):
-		mult = 1 << 30
-		s = strings.TrimSuffix(s, "GB")
-	case strings.HasSuffix(s, "MB"):
-		mult = 1 << 20
-		s = strings.TrimSuffix(s, "MB")
-	case strings.HasSuffix(s, "KB"):
-		mult = 1 << 10
-		s = strings.TrimSuffix(s, "KB")
-	case strings.HasSuffix(s, "B"):
-		s = strings.TrimSuffix(s, "B")
-	}
-	v, _ := strconv.ParseFloat(strings.TrimSpace(s), 64)
-	return int64(v * mult)
-}
-
 func parseMemUsage(s string) uint64 {
-	// "123.4MiB / 7.8GiB"
 	part := strings.Split(s, "/")[0]
 	part = strings.TrimSpace(part)
 	part = strings.ToUpper(part)
@@ -308,25 +262,6 @@ func parseMemUsage(s string) uint64 {
 	return uint64(v * mult)
 }
 
-func parseDockerTime(s string) time.Time {
-	layouts := []string{
-		time.RFC3339,
-		"2006-01-02 15:04:05 -0700 MST",
-		"2006-01-02 15:04:05 -0700 MSK",
-	}
-	for _, layout := range layouts {
-		if t, err := time.Parse(layout, s); err == nil {
-			return t.UTC()
-		}
-	}
-	return time.Time{}
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if strings.TrimSpace(v) != "" {
-			return v
-		}
-	}
-	return ""
+func round2(v float64) float64 {
+	return float64(int(v*100+0.5)) / 100
 }

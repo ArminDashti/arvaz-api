@@ -4,45 +4,77 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"net"
 	"os/exec"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ArminDashti/arvaz-api/internal/asn"
+	"github.com/ArminDashti/arvaz-api/internal/haproxy"
 )
 
 type OnlineSession struct {
 	Username               string     `json:"username"`
 	ClientIP               string     `json:"clientIp"`
-	ASN                    *string    `json:"asn"`
-	BandwidthBps           float64    `json:"bandwidthBps"`
+	LastASN                string     `json:"lastAsn,omitempty"`
+	SessionName            string     `json:"sessionName,omitempty"`
+	ConnectionName         string     `json:"connectionName,omitempty"`
 	DownloadBytes          uint64     `json:"downloadBytes"`
 	UploadBytes            uint64     `json:"uploadBytes"`
-	SessionDurationSeconds int64      `json:"sessionDurationSeconds"`
-	ConnectedAt            *time.Time `json:"connectedAt"`
-	SessionKey             string     `json:"sessionKey"`
+	TransferBytes          uint64     `json:"transferBytes,omitempty"`
+	SessionDurationSeconds int64      `json:"sessionDurationSeconds,omitempty"`
+	ConnectedAt            *time.Time `json:"connectedAt,omitempty"`
+	SessionKey             string     `json:"sessionKey,omitempty"`
+}
+
+type HubUser struct {
+	Username      string `json:"username"`
+	NumLogins     int64  `json:"numLogins"`
+	LastLogin     string `json:"lastLogin"`
+	DownloadBytes uint64 `json:"downloadBytes"`
+	UploadBytes   uint64 `json:"uploadBytes"`
+	LastIP        string `json:"lastIp,omitempty"`
+	LastASN       string `json:"lastAsn,omitempty"`
+	GroupName     string `json:"groupName,omitempty"`
+	AuthMethod    string `json:"authMethod,omitempty"`
+	TransferBytes uint64 `json:"transferBytes,omitempty"`
 }
 
 type Client struct {
-	Container string
-	Password  string
-	Hub       string
-	Enabled   bool
-	ASN       asn.Resolver
+	Container     string
+	Password      string
+	Hub           string
+	Enabled       bool
+	VpncmdTimeout time.Duration
+	ASN           asn.Resolver
+	HAProxy       *haproxy.Client
+	mu            sync.Mutex
 }
 
-func New(container, password, hub string, enabled bool, resolver asn.Resolver) *Client {
+func New(container, password, hub string, enabled bool, vpncmdTimeout time.Duration, resolver asn.Resolver, hap *haproxy.Client) *Client {
+	if vpncmdTimeout <= 0 {
+		vpncmdTimeout = 20 * time.Second
+	}
+	if hub == "" {
+		hub = "DEFAULT"
+	}
+	if container == "" {
+		container = "softether"
+	}
 	if resolver == nil {
 		resolver = asn.NullResolver{}
 	}
 	return &Client{
-		Container: container,
-		Password:  password,
-		Hub:       hub,
-		Enabled:   enabled,
-		ASN:       resolver,
+		Container:     container,
+		Password:      password,
+		Hub:           hub,
+		Enabled:       enabled,
+		VpncmdTimeout: vpncmdTimeout,
+		ASN:           resolver,
+		HAProxy:       hap,
 	}
 }
 
@@ -54,16 +86,113 @@ func (c *Client) ListOnlineSessions(ctx context.Context) ([]OnlineSession, error
 	if err != nil {
 		return nil, err
 	}
-	return parseSessionList(out, c.ASN), nil
+	sessions := parseSessionList(out, time.Now().UTC())
+	connList, _ := c.vpncmd(ctx, "/CMD", "ConnectionList")
+	connPorts := parseConnectionListPorts(connList)
+
+	for i := range sessions {
+		s := &sessions[i]
+		if s.SessionName == "" {
+			continue
+		}
+		detail, err := c.sessionGet(ctx, s.SessionName)
+		clientPort := 0
+		if err == nil {
+			enrichFromSessionGet(s, detail, time.Now().UTC())
+			clientPort = parseClientPort(detail)
+		}
+		// Never keep private/docker bridge IPs in the API response.
+		if s.ClientIP != "" && !isPublicIP(s.ClientIP) {
+			s.ClientIP = ""
+		}
+		if s.ClientIP == "" && c.HAProxy != nil {
+			ports := make([]int, 0, 2)
+			if clientPort > 0 {
+				ports = append(ports, clientPort)
+			}
+			if s.ConnectedAt != nil {
+				if p := lookupPortByConnectedAt(connPorts, *s.ConnectedAt); p > 0 {
+					ports = append(ports, p)
+				}
+			}
+			for _, port := range ports {
+				if ip := c.HAProxy.LookupByBackendPort(ctx, port); ip != "" {
+					s.ClientIP = ip
+					break
+				}
+			}
+			if s.ClientIP == "" {
+				if ip := c.HAProxy.LookupByConnectedAt(ctx, s.ConnectedAt); ip != "" {
+					s.ClientIP = ip
+				}
+			}
+		}
+		if s.ClientIP != "" {
+			if label := c.ASN.Lookup(s.ClientIP); label != "" {
+				s.LastASN = label
+			}
+		}
+		s.SessionKey = s.Username + "|" + s.ClientIP + "|" + s.SessionName
+	}
+	return sessions, nil
+}
+
+func (c *Client) ListUsers(ctx context.Context) ([]HubUser, error) {
+	if !c.Enabled {
+		return []HubUser{}, nil
+	}
+	out, err := c.vpncmd(ctx, "/HUB:"+c.Hub, "/CMD", "UserList")
+	if err != nil {
+		return nil, err
+	}
+	users := parseUserList(out)
+	for i := range users {
+		detail, err := c.userGet(ctx, users[i].Username)
+		if err != nil {
+			continue
+		}
+		enrichUserFromUserGet(&users[i], detail)
+	}
+	return users, nil
+}
+
+func (c *Client) sessionGet(ctx context.Context, sessionName string) (string, error) {
+	name := strings.TrimSpace(sessionName)
+	if name == "" {
+		return "", fmt.Errorf("empty session name")
+	}
+	return c.vpncmd(ctx, "/HUB:"+c.Hub, "/CMD", "SessionGet", name)
+}
+
+func (c *Client) userGet(ctx context.Context, username string) (string, error) {
+	name := strings.TrimSpace(username)
+	if name == "" {
+		return "", fmt.Errorf("empty username")
+	}
+	return c.vpncmd(ctx, "/HUB:"+c.Hub, "/CMD", "UserGet", name)
 }
 
 func (c *Client) vpncmd(ctx context.Context, args ...string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// SoftEther already uses thousands of threads (each counts toward cgroup pids).
+	// Do not wrap with the `timeout` binary — that extra fork fails under pressure
+	// and can leave zombie [timeout] tasks when killed. Enforce deadline via context.
+	runTimeout := c.VpncmdTimeout
+	if runTimeout < time.Second {
+		runTimeout = 20 * time.Second
+	}
+	runCtx, cancel := context.WithTimeout(ctx, runTimeout)
+	defer cancel()
+
 	cmdArgs := []string{
-		"exec", c.Container,
+		"exec", "-i", c.Container,
 		"vpncmd", "localhost", "/SERVER", "/PASSWORD:" + c.Password,
 	}
 	cmdArgs = append(cmdArgs, args...)
-	cmd := exec.CommandContext(ctx, "docker", cmdArgs...)
+	cmd := exec.CommandContext(runCtx, "docker", cmdArgs...)
+	cmd.Stdin = strings.NewReader(c.Password + "\n")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -75,55 +204,326 @@ func (c *Client) vpncmd(ctx context.Context, args ...string) (string, error) {
 		if msg == "" {
 			msg = err.Error()
 		}
-		return "", fmt.Errorf("vpncmd failed: %s", msg)
+		if strings.Contains(msg, "Password:") || strings.Contains(msg, "Access has been denied") {
+			return "", fmt.Errorf("softether auth failed (check SOFTETHER_PASSWORD)")
+		}
+		if runCtx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("vpncmd failed: timed out after %s", runTimeout)
+		}
+		return "", fmt.Errorf("vpncmd failed: %s", truncate(msg, 240))
 	}
 	return stdout.String(), nil
 }
 
 var (
-	reSessionName = regexp.MustCompile(`(?i)Session\s*Name\s*\|\s*(.+)`)
-	reUserName    = regexp.MustCompile(`(?i)User\s*Name\s*\|\s*(.+)`)
-	reClientIP    = regexp.MustCompile(`(?i)(Client\s*IP|Source\s*IP|IP\s*Address)\s*\|\s*([0-9a-fA-F\.:]+)`)
-	reTransfer    = regexp.MustCompile(`(?i)(Transfer|Traffic|Bytes).*\|\s*([0-9,]+)\s*(bytes)?`)
+	reSessionName    = regexp.MustCompile(`(?i)Session\s*Name\s*\|\s*(.+)`)
+	reUserName       = regexp.MustCompile(`(?i)User\s*Name\s*\|\s*(.+)`)
+	reConnectionName = regexp.MustCompile(`(?i)Connection\s*Name\s*\|\s*(.+)`)
+	reIPField        = regexp.MustCompile(`(?i)(Client\s*IP(?:\s*Address)?|Source\s*IP(?:\s*Address)?|Source\s*Host\s*Name)\s*\|\s*(.+)`)
+	reAnyIPv4        = regexp.MustCompile(`\b((?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d))(?:[:/]\d+)?\b`)
+	reTransfer       = regexp.MustCompile(`(?i)(Transfer|Traffic|Bytes|Download|Upload|Incoming|Outgoing).*\|\s*([0-9,]+)\s*(bytes)?`)
+	reTransferBytes  = regexp.MustCompile(`(?i)Transfer\s*Bytes\s*\|\s*([0-9,]+)`)
+	reOutgoingData   = regexp.MustCompile(`(?i)Outgoing\s*Data\s*Size\s*\|\s*([0-9,]+)`)
+	reIncomingData   = regexp.MustCompile(`(?i)Incoming\s*Data\s*Size\s*\|\s*([0-9,]+)`)
+	reOutgoingUni    = regexp.MustCompile(`(?i)Outgoing\s*Unicast\s*Total\s*Size\s*\|\s*([0-9,]+)`)
+	reIncomingUni    = regexp.MustCompile(`(?i)Incoming\s*Unicast\s*Total\s*Size\s*\|\s*([0-9,]+)`)
+	reConnStarted    = regexp.MustCompile(`(?i)(Connection\s*Started\s*at|Current\s*Session\s*has\s*been\s*Established\s*since|First\s*Session\s*has\s*been\s*Established\s*since)\s*\|\s*(.+)`)
+	reDuration       = regexp.MustCompile(`(?i)(Session\s*Duration|Connection\s*Time|Time\s*Connected|Duration)\s*\|\s*(.+)`)
+	reNumLogins      = regexp.MustCompile(`(?i)Num(?:ber)?\s*of\s*Logins\s*\|\s*([0-9,]+)`)
+	reLastLogin      = regexp.MustCompile(`(?i)Last\s*Login\s*\|\s*(.+)`)
+	reGroupName      = regexp.MustCompile(`(?i)Group\s*Name\s*\|\s*(.+)`)
+	reAuthMethod     = regexp.MustCompile(`(?i)Auth\s*(?:Type|Method)\s*\|\s*(.+)`)
+	reClientPort     = regexp.MustCompile(`(?i)Client\s*Port(?:\s*\(Reported\))?\s*\|\s*([0-9,]+)`)
 )
 
-func parseSessionList(raw string, resolver asn.Resolver) []OnlineSession {
+func parseClientPort(detail string) int {
+	raw := matchFirst(reClientPort, detail)
+	if raw == "" {
+		return 0
+	}
+	n, _ := strconv.Atoi(strings.ReplaceAll(raw, ",", ""))
+	return n
+}
+
+type connPortEntry struct {
+	Port int
+	At   time.Time
+}
+
+var reConnListRow = regexp.MustCompile(`(?i)(CID-\d+)\s*\|\s*([0-9.]+):\s*([0-9]+)\s*\|\s*([^|]+)`)
+
+func parseConnectionListPorts(raw string) []connPortEntry {
+	out := make([]connPortEntry, 0, 32)
+	for _, line := range strings.Split(raw, "\n") {
+		m := reConnListRow.FindStringSubmatch(line)
+		if len(m) < 5 {
+			continue
+		}
+		port, _ := strconv.Atoi(m[3])
+		if port <= 0 {
+			continue
+		}
+		at := parseSoftEtherTime(strings.TrimSpace(m[4]))
+		if at == nil {
+			continue
+		}
+		out = append(out, connPortEntry{Port: port, At: *at})
+	}
+	return out
+}
+
+func lookupPortByConnectedAt(entries []connPortEntry, connectedAt time.Time) int {
+	bestPort := 0
+	bestDelta := time.Duration(1<<63 - 1)
+	for _, e := range entries {
+		d := e.At.Sub(connectedAt)
+		if d < 0 {
+			d = -d
+		}
+		if d <= 3*time.Second && d < bestDelta {
+			bestDelta = d
+			bestPort = e.Port
+		}
+	}
+	return bestPort
+}
+
+func enrichFromSessionGet(s *OnlineSession, detail string, now time.Time) {
+	if cn := matchFirst(reConnectionName, detail); cn != "" {
+		s.ConnectionName = cn
+	}
+	// SoftEther: Outgoing = to client = Download; Incoming = from client = Upload.
+	if n := parseUintComma(matchFirst(reOutgoingData, detail)); n > 0 {
+		s.DownloadBytes = n
+	}
+	if n := parseUintComma(matchFirst(reIncomingData, detail)); n > 0 {
+		s.UploadBytes = n
+	}
+	s.TransferBytes = s.DownloadBytes + s.UploadBytes
+	if t := parseSoftEtherTime(matchFirstGroup(reConnStarted, detail, 2)); t != nil {
+		s.ConnectedAt = t
+		s.SessionDurationSeconds = int64(now.Sub(*t).Seconds())
+		if s.SessionDurationSeconds < 0 {
+			s.SessionDurationSeconds = 0
+		}
+	} else if dur := parseDurationSeconds(detail); dur > 0 {
+		s.SessionDurationSeconds = dur
+		tt := now.Add(-time.Duration(dur) * time.Second)
+		s.ConnectedAt = &tt
+	}
+	if ip := pickPublicIP(detail); ip != "" {
+		s.ClientIP = ip
+	}
+}
+
+func enrichUserFromUserGet(u *HubUser, detail string) {
+	// Lifetime totals: Outgoing Unicast = download; Incoming Unicast = upload.
+	if n := parseUintComma(matchFirst(reOutgoingUni, detail)); n > 0 {
+		u.DownloadBytes = n
+	}
+	if n := parseUintComma(matchFirst(reIncomingUni, detail)); n > 0 {
+		u.UploadBytes = n
+	}
+	u.TransferBytes = u.DownloadBytes + u.UploadBytes
+	if n := parseUintComma(matchFirst(reNumLogins, detail)); n > 0 {
+		u.NumLogins = int64(n)
+	}
+}
+
+func parseSessionList(raw string, now time.Time) []OnlineSession {
 	blocks := splitBlocks(raw)
 	out := make([]OnlineSession, 0, len(blocks))
-	now := time.Now().UTC()
 	for _, block := range blocks {
 		name := matchFirst(reSessionName, block)
 		user := matchFirst(reUserName, block)
 		if user == "" {
 			user = name
 		}
-		if user == "" || strings.EqualFold(user, "SecureNAT") {
+		if user == "" || strings.EqualFold(user, "SecureNAT") || strings.EqualFold(user, "Local Bridge") {
 			continue
 		}
-		ip := ""
-		if m := reClientIP.FindStringSubmatch(block); len(m) >= 3 {
-			ip = strings.TrimSpace(m[2])
+		if strings.Contains(strings.ToUpper(name), "LOCALBRIDGE") {
+			continue
 		}
+		ip := pickPublicIP(block)
 		dl, ul := parseTraffic(block)
-		var asnPtr *string
-		if a := resolver.Lookup(ip); a != "" {
-			asnPtr = &a
-		}
-		key := user + "|" + ip + "|" + name
-		connected := now.Add(-5 * time.Minute)
 		out = append(out, OnlineSession{
-			Username:               user,
-			ClientIP:               ip,
-			ASN:                    asnPtr,
-			BandwidthBps:           0,
-			DownloadBytes:          dl,
-			UploadBytes:            ul,
-			SessionDurationSeconds: 300,
-			ConnectedAt:            &connected,
-			SessionKey:             key,
+			Username:      user,
+			ClientIP:      ip,
+			SessionName:   name,
+			DownloadBytes: dl,
+			UploadBytes:   ul,
+			TransferBytes: dl + ul,
+		})
+	}
+	_ = now
+	return out
+}
+
+func parseUserList(raw string) []HubUser {
+	blocks := splitBlocks(raw)
+	out := make([]HubUser, 0, len(blocks))
+	for _, block := range blocks {
+		user := matchFirst(reUserName, block)
+		if user == "" {
+			continue
+		}
+		group := matchFirst(reGroupName, block)
+		if group == "-" {
+			group = ""
+		}
+		transfer := parseUintComma(matchFirst(reTransferBytes, block))
+		out = append(out, HubUser{
+			Username:      user,
+			GroupName:     group,
+			AuthMethod:    matchFirst(reAuthMethod, block),
+			NumLogins:     int64(parseUintComma(matchFirst(reNumLogins, block))),
+			LastLogin:     matchFirst(reLastLogin, block),
+			TransferBytes: transfer,
 		})
 	}
 	return out
+}
+
+func pickPublicIP(block string) string {
+	var candidates []string
+	for _, m := range reIPField.FindAllStringSubmatch(block, -1) {
+		if len(m) < 3 {
+			continue
+		}
+		val := strings.TrimSpace(m[2])
+		candidates = append(candidates, extractIPs(val)...)
+	}
+	for _, c := range candidates {
+		if isPublicIP(c) {
+			return c
+		}
+	}
+	return ""
+}
+
+func extractIPs(s string) []string {
+	ms := reAnyIPv4.FindAllStringSubmatch(s, -1)
+	out := make([]string, 0, len(ms))
+	seen := map[string]struct{}{}
+	for _, m := range ms {
+		if len(m) < 2 {
+			continue
+		}
+		ip := m[1]
+		if _, ok := seen[ip]; ok {
+			continue
+		}
+		seen[ip] = struct{}{}
+		out = append(out, ip)
+	}
+	return out
+}
+
+func isPublicIP(s string) bool {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return false
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		if ip4[0] == 10 {
+			return false
+		}
+		if ip4[0] == 172 && ip4[1] >= 16 && ip4[1] <= 31 {
+			return false
+		}
+		if ip4[0] == 192 && ip4[1] == 168 {
+			return false
+		}
+		if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+			return false
+		}
+	}
+	return true
+}
+
+func parseTraffic(block string) (uint64, uint64) {
+	// Prefer SoftEther session get fields when present in block.
+	outg := parseUintComma(matchFirst(reOutgoingData, block))
+	inc := parseUintComma(matchFirst(reIncomingData, block))
+	if outg > 0 || inc > 0 {
+		return outg, inc
+	}
+	matches := reTransfer.FindAllStringSubmatch(block, -1)
+	vals := make([]uint64, 0, 2)
+	for _, m := range matches {
+		if len(m) < 3 {
+			continue
+		}
+		vals = append(vals, parseUintComma(m[2]))
+	}
+	if len(vals) >= 2 {
+		return vals[0], vals[1]
+	}
+	if len(vals) == 1 {
+		return vals[0], 0
+	}
+	return 0, 0
+}
+
+func parseDurationSeconds(block string) int64 {
+	m := reDuration.FindStringSubmatch(block)
+	raw := ""
+	if len(m) >= 3 {
+		raw = strings.TrimSpace(m[2])
+	}
+	if raw == "" {
+		return 0
+	}
+	if secs, err := strconv.ParseInt(strings.ReplaceAll(raw, ",", ""), 10, 64); err == nil {
+		return secs
+	}
+	var days, hours, mins, secs int64
+	rePart := regexp.MustCompile(`(?i)(\d+)\s*(day|hour|min|sec)`)
+	for _, mm := range rePart.FindAllStringSubmatch(raw, -1) {
+		if len(mm) < 3 {
+			continue
+		}
+		n, _ := strconv.ParseInt(mm[1], 10, 64)
+		unit := strings.ToLower(mm[2])
+		switch {
+		case strings.HasPrefix(unit, "day"):
+			days = n
+		case strings.HasPrefix(unit, "hour"):
+			hours = n
+		case strings.HasPrefix(unit, "min"):
+			mins = n
+		case strings.HasPrefix(unit, "sec"):
+			secs = n
+		}
+	}
+	return days*86400 + hours*3600 + mins*60 + secs
+}
+
+// SoftEther time like: 2026-08-12 (Wed) 15:07:37
+func parseSoftEtherTime(raw string) *time.Time {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "-" {
+		return nil
+	}
+	re := regexp.MustCompile(`(\d{4})-(\d{2})-(\d{2}).*?(\d{1,2}):(\d{2}):(\d{2})`)
+	m := re.FindStringSubmatch(raw)
+	if len(m) < 7 {
+		return nil
+	}
+	y, _ := strconv.Atoi(m[1])
+	mo, _ := strconv.Atoi(m[2])
+	d, _ := strconv.Atoi(m[3])
+	h, _ := strconv.Atoi(m[4])
+	mi, _ := strconv.Atoi(m[5])
+	s, _ := strconv.Atoi(m[6])
+	// SoftEther timestamps on T3 are local server time.
+	loc := time.Local
+	t := time.Date(y, time.Month(mo), d, h, mi, s, 0, loc)
+	return &t
 }
 
 func splitBlocks(raw string) []string {
@@ -159,23 +559,28 @@ func matchFirst(re *regexp.Regexp, block string) string {
 	return strings.TrimSpace(m[1])
 }
 
-func parseTraffic(block string) (uint64, uint64) {
-	matches := reTransfer.FindAllStringSubmatch(block, -1)
-	vals := make([]uint64, 0, 2)
-	for _, m := range matches {
-		if len(m) < 3 {
-			continue
-		}
-		n, err := strconv.ParseUint(strings.ReplaceAll(m[2], ",", ""), 10, 64)
-		if err == nil {
-			vals = append(vals, n)
-		}
+func matchFirstGroup(re *regexp.Regexp, block string, group int) string {
+	m := re.FindStringSubmatch(block)
+	if len(m) <= group {
+		return ""
 	}
-	if len(vals) >= 2 {
-		return vals[0], vals[1]
+	return strings.TrimSpace(m[group])
+}
+
+func parseUintComma(s string) uint64 {
+	s = strings.ReplaceAll(strings.TrimSpace(s), ",", "")
+	s = strings.TrimSuffix(strings.ToLower(s), " bytes")
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0
 	}
-	if len(vals) == 1 {
-		return vals[0], 0
+	n, _ := strconv.ParseUint(s, 10, 64)
+	return n
+}
+
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
 	}
-	return 0, 0
+	return s[:n] + "…"
 }

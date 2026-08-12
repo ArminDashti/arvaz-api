@@ -40,4 +40,7 @@ Thumbs.db
 # === auto-managed large files (github-commit-push-all) ===
 # auto-managed-large-files
 arvaz-api.exe
+arvaz-api-linux
 .armin/docker-data/postgres/pg_wal/000000010000000000000001
+
+# github-commit-push-all: auto-ignore large files (>5MB)

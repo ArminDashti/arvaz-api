@@ -8,21 +8,22 @@ import (
 )
 
 type Config struct {
-	HTTPAddr              string
-	DatabaseURL           string
-	JWTSecret             string
-	DefaultUsername       string
-	DefaultPassword       string
-	CORSOrigins           []string
-	SoftEtherContainer    string
-	SoftEtherPassword     string
-	SoftEtherHub          string
-	SoftEtherEnabled      bool
-	MetricsHistoryPoints  int
-	SoftEtherPollEvery    time.Duration
-	PublicIP              string
-	DirectoriesRoot       string
-	DirectoriesMaxUploadMB int
+	HTTPAddr               string
+	DatabaseURL            string
+	JWTSecret              string
+	DefaultUsername        string
+	DefaultPassword        string
+	CORSOrigins            []string
+	PublicIP               string
+	HAProxyConfigPath      string
+	MullvadContainer       string
+	SoftEtherContainer     string
+	SoftEtherPassword      string
+	SoftEtherHub           string
+	SoftEtherEnabled       bool
+	SoftEtherVpncmdTimeout time.Duration
+	SoftEtherPollEvery     time.Duration
+	AsipBaseURL            string
 }
 
 func Load() Config {
@@ -33,15 +34,16 @@ func Load() Config {
 		DefaultUsername:        getenv("DEFAULT_USERNAME", "armin"),
 		DefaultPassword:        getenv("DEFAULT_PASSWORD", "dopadopa1234"),
 		CORSOrigins:            splitCSV(getenv("CORS_ORIGINS", "http://127.0.0.1:5173,http://localhost:5173")),
+		PublicIP:               getenv("PUBLIC_IP", "2.144.27.74"),
+		HAProxyConfigPath:      getenv("HAPROXY_CONFIG_PATH", "/cloud-admin/docker-volumes/reverse-proxy/haproxy/config/haproxy.cfg"),
+		MullvadContainer:       getenv("MULLVAD_CONTAINER", "mullvad-1"),
 		SoftEtherContainer:     getenv("SOFTETHER_CONTAINER", "softether"),
-		SoftEtherPassword:      getenv("SOFTETHER_PASSWORD", ""),
+		SoftEtherPassword:      getenv("SOFTETHER_PASSWORD", "dopadopa123"),
 		SoftEtherHub:           getenv("SOFTETHER_HUB", "DEFAULT"),
 		SoftEtherEnabled:       getenvBool("SOFTETHER_ENABLED", true),
-		MetricsHistoryPoints:   getenvInt("METRICS_HISTORY_POINTS", 60),
+		SoftEtherVpncmdTimeout: time.Duration(getenvInt("SOFTETHER_VPNCMD_TIMEOUT_SECONDS", 20)) * time.Second,
 		SoftEtherPollEvery:     time.Duration(getenvInt("SOFTETHER_POLL_SECONDS", 30)) * time.Second,
-		PublicIP:               getenv("PUBLIC_IP", "2.144.27.74"),
-		DirectoriesRoot:        getenv("DIRECTORIES_ROOT", "/home/cloud-admin"),
-		DirectoriesMaxUploadMB: getenvInt("DIRECTORIES_MAX_UPLOAD_MB", 50),
+		AsipBaseURL:            getenv("ASIP_BASE_URL", "http://127.0.0.1:3000"),
 	}
 }
 
