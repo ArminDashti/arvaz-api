@@ -45,17 +45,20 @@ type Relay struct {
 }
 
 type PingResult struct {
-	Target string `json:"target"`
-	Raw    string `json:"raw"`
+	Target            string  `json:"target"`
+	Count             int     `json:"count"`
+	PacketLossPercent float64 `json:"packetLossPercent"`
+	AvgMs             float64 `json:"avgMs"`
+	Raw               string  `json:"raw,omitempty"`
 }
 
 type SpeedtestResult struct {
-	Mode            string  `json:"mode"`
-	Raw             string  `json:"raw"`
-	DownloadMbps    float64 `json:"downloadMbps,omitempty"`
-	UploadMbps      float64 `json:"uploadMbps,omitempty"`
-	LatencyMs       float64 `json:"latencyMs,omitempty"`
-	ParsedOK        bool    `json:"parsedOk"`
+	Mode         string  `json:"mode"`
+	Raw          string  `json:"raw"`
+	DownloadMbps float64 `json:"downloadMbps,omitempty"`
+	UploadMbps   float64 `json:"uploadMbps,omitempty"`
+	LatencyMs    float64 `json:"latencyMs,omitempty"`
+	ParsedOK     bool    `json:"parsedOk"`
 }
 
 var (
@@ -154,16 +157,54 @@ func (c *Client) SetAntiCensorship(ctx context.Context, mode string) error {
 	return err
 }
 
-func (c *Client) Ping(ctx context.Context, target string) (*PingResult, error) {
+func (c *Client) Ping(ctx context.Context, target string, count int) (*PingResult, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		target = "1.1.1.1"
 	}
-	raw, err := c.exec(ctx, 20*time.Second, "ping", "-c", "4", target)
+	if !validPingTarget(target) {
+		return nil, fmt.Errorf("invalid ping target")
+	}
+	if count < 1 {
+		count = 4
+	}
+	if count > 20 {
+		count = 20
+	}
+	timeout := time.Duration(count*2+10) * time.Second
+	if timeout < 20*time.Second {
+		timeout = 20 * time.Second
+	}
+	raw, err := c.exec(ctx, timeout, "ping", "-c", strconv.Itoa(count), target)
 	if err != nil && raw == "" {
 		return nil, err
 	}
-	return &PingResult{Target: target, Raw: strings.TrimSpace(raw)}, nil
+	loss, avg := parsePingStats(raw)
+	return &PingResult{
+		Target:            target,
+		Count:             count,
+		PacketLossPercent: loss,
+		AvgMs:             avg,
+		Raw:               strings.TrimSpace(raw),
+	}, nil
+}
+
+var rePingTarget = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
+var rePingLoss = regexp.MustCompile(`(?i)(\d+(?:\.\d+)?)%\s*packet\s+loss`)
+var rePingAvg = regexp.MustCompile(`(?i)(?:rtt|round-trip)[^=]*=\s*[0-9.]+/([0-9.]+)`)
+
+func validPingTarget(s string) bool {
+	return rePingTarget.MatchString(s)
+}
+
+func parsePingStats(raw string) (lossPercent, avgMs float64) {
+	if m := rePingLoss.FindStringSubmatch(raw); len(m) == 2 {
+		lossPercent, _ = strconv.ParseFloat(m[1], 64)
+	}
+	if m := rePingAvg.FindStringSubmatch(raw); len(m) == 2 {
+		avgMs, _ = strconv.ParseFloat(m[1], 64)
+	}
+	return lossPercent, avgMs
 }
 
 func (c *Client) Speedtest(ctx context.Context, mode string) (*SpeedtestResult, error) {
@@ -202,7 +243,7 @@ func parseSpeedtestJSON(res *SpeedtestResult) {
 	// Minimal parse without encoding/json import churn for nested fields.
 	// speedtest-cli JSON: download/upload in bit/s, ping in ms.
 	reNum := func(key string) float64 {
-		m := regexp.MustCompile(`"`+key+`"\s*:\s*([0-9.]+)`).FindStringSubmatch(raw)
+		m := regexp.MustCompile(`"` + key + `"\s*:\s*([0-9.]+)`).FindStringSubmatch(raw)
 		if len(m) < 2 {
 			return 0
 		}

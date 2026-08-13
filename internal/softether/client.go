@@ -19,7 +19,7 @@ import (
 type OnlineSession struct {
 	Username               string     `json:"username"`
 	ClientIP               string     `json:"clientIp"`
-	LastASN                string     `json:"lastAsn,omitempty"`
+	LastISP                string     `json:"lastIsp,omitempty"`
 	SessionName            string     `json:"sessionName,omitempty"`
 	ConnectionName         string     `json:"connectionName,omitempty"`
 	DownloadBytes          uint64     `json:"downloadBytes"`
@@ -37,7 +37,7 @@ type HubUser struct {
 	DownloadBytes uint64 `json:"downloadBytes"`
 	UploadBytes   uint64 `json:"uploadBytes"`
 	LastIP        string `json:"lastIp,omitempty"`
-	LastASN       string `json:"lastAsn,omitempty"`
+	LastISP       string `json:"lastIsp,omitempty"`
 	GroupName     string `json:"groupName,omitempty"`
 	AuthMethod    string `json:"authMethod,omitempty"`
 	TransferBytes uint64 `json:"transferBytes,omitempty"`
@@ -129,7 +129,7 @@ func (c *Client) ListOnlineSessions(ctx context.Context) ([]OnlineSession, error
 		}
 		if s.ClientIP != "" {
 			if label := c.ASN.Lookup(s.ClientIP); label != "" {
-				s.LastASN = label
+				s.LastISP = label
 			}
 		}
 		s.SessionKey = s.Username + "|" + s.ClientIP + "|" + s.SessionName
@@ -221,12 +221,13 @@ var (
 	reConnectionName = regexp.MustCompile(`(?i)Connection\s*Name\s*\|\s*(.+)`)
 	reIPField        = regexp.MustCompile(`(?i)(Client\s*IP(?:\s*Address)?|Source\s*IP(?:\s*Address)?|Source\s*Host\s*Name)\s*\|\s*(.+)`)
 	reAnyIPv4        = regexp.MustCompile(`\b((?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d))(?:[:/]\d+)?\b`)
-	reTransfer       = regexp.MustCompile(`(?i)(Transfer|Traffic|Bytes|Download|Upload|Incoming|Outgoing).*\|\s*([0-9,]+)\s*(bytes)?`)
 	reTransferBytes  = regexp.MustCompile(`(?i)Transfer\s*Bytes\s*\|\s*([0-9,]+)`)
 	reOutgoingData   = regexp.MustCompile(`(?i)Outgoing\s*Data\s*Size\s*\|\s*([0-9,]+)`)
 	reIncomingData   = regexp.MustCompile(`(?i)Incoming\s*Data\s*Size\s*\|\s*([0-9,]+)`)
 	reOutgoingUni    = regexp.MustCompile(`(?i)Outgoing\s*Unicast\s*Total\s*Size\s*\|\s*([0-9,]+)`)
 	reIncomingUni    = regexp.MustCompile(`(?i)Incoming\s*Unicast\s*Total\s*Size\s*\|\s*([0-9,]+)`)
+	reOutgoingBcast  = regexp.MustCompile(`(?i)Outgoing\s*Broadcast\s*Total\s*Size\s*\|\s*([0-9,]+)`)
+	reIncomingBcast  = regexp.MustCompile(`(?i)Incoming\s*Broadcast\s*Total\s*Size\s*\|\s*([0-9,]+)`)
 	reConnStarted    = regexp.MustCompile(`(?i)(Connection\s*Started\s*at|Current\s*Session\s*has\s*been\s*Established\s*since|First\s*Session\s*has\s*been\s*Established\s*since)\s*\|\s*(.+)`)
 	reDuration       = regexp.MustCompile(`(?i)(Session\s*Duration|Connection\s*Time|Time\s*Connected|Duration)\s*\|\s*(.+)`)
 	reNumLogins      = regexp.MustCompile(`(?i)Num(?:ber)?\s*of\s*Logins\s*\|\s*([0-9,]+)`)
@@ -292,14 +293,10 @@ func enrichFromSessionGet(s *OnlineSession, detail string, now time.Time) {
 	if cn := matchFirst(reConnectionName, detail); cn != "" {
 		s.ConnectionName = cn
 	}
-	// SoftEther: Outgoing = to client = Download; Incoming = from client = Upload.
-	if n := parseUintComma(matchFirst(reOutgoingData, detail)); n > 0 {
-		s.DownloadBytes = n
-	}
-	if n := parseUintComma(matchFirst(reIncomingData, detail)); n > 0 {
-		s.UploadBytes = n
-	}
-	s.TransferBytes = s.DownloadBytes + s.UploadBytes
+	dl, ul := parseTraffic(detail)
+	s.DownloadBytes = dl
+	s.UploadBytes = ul
+	s.TransferBytes = dl + ul
 	if t := parseSoftEtherTime(matchFirstGroup(reConnStarted, detail, 2)); t != nil {
 		s.ConnectedAt = t
 		s.SessionDurationSeconds = int64(now.Sub(*t).Seconds())
@@ -317,14 +314,10 @@ func enrichFromSessionGet(s *OnlineSession, detail string, now time.Time) {
 }
 
 func enrichUserFromUserGet(u *HubUser, detail string) {
-	// Lifetime totals: Outgoing Unicast = download; Incoming Unicast = upload.
-	if n := parseUintComma(matchFirst(reOutgoingUni, detail)); n > 0 {
-		u.DownloadBytes = n
-	}
-	if n := parseUintComma(matchFirst(reIncomingUni, detail)); n > 0 {
-		u.UploadBytes = n
-	}
-	u.TransferBytes = u.DownloadBytes + u.UploadBytes
+	dl, ul := parseTraffic(detail)
+	u.DownloadBytes = dl
+	u.UploadBytes = ul
+	u.TransferBytes = dl + ul
 	if n := parseUintComma(matchFirst(reNumLogins, detail)); n > 0 {
 		u.NumLogins = int64(n)
 	}
@@ -445,26 +438,22 @@ func isPublicIP(s string) bool {
 	return true
 }
 
-func parseTraffic(block string) (uint64, uint64) {
-	// Prefer SoftEther session get fields when present in block.
-	outg := parseUintComma(matchFirst(reOutgoingData, block))
-	inc := parseUintComma(matchFirst(reIncomingData, block))
-	if outg > 0 || inc > 0 {
-		return outg, inc
+// parseTraffic returns client download (SoftEther outgoing) and upload (incoming).
+// Prefers Data Size; otherwise Unicast Total Size + Broadcast Total Size.
+// Packet-count lines are ignored.
+func parseTraffic(block string) (download, upload uint64) {
+	outData := parseUintComma(matchFirst(reOutgoingData, block))
+	inData := parseUintComma(matchFirst(reIncomingData, block))
+	if outData > 0 || inData > 0 {
+		return outData, inData
 	}
-	matches := reTransfer.FindAllStringSubmatch(block, -1)
-	vals := make([]uint64, 0, 2)
-	for _, m := range matches {
-		if len(m) < 3 {
-			continue
-		}
-		vals = append(vals, parseUintComma(m[2]))
+	out := parseUintComma(matchFirst(reOutgoingUni, block)) + parseUintComma(matchFirst(reOutgoingBcast, block))
+	in := parseUintComma(matchFirst(reIncomingUni, block)) + parseUintComma(matchFirst(reIncomingBcast, block))
+	if out > 0 || in > 0 {
+		return out, in
 	}
-	if len(vals) >= 2 {
-		return vals[0], vals[1]
-	}
-	if len(vals) == 1 {
-		return vals[0], 0
+	if n := parseUintComma(matchFirst(reTransferBytes, block)); n > 0 {
+		return n, 0
 	}
 	return 0, 0
 }

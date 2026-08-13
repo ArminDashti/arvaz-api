@@ -5,12 +5,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 )
 
-// Resolver returns a display label for an IP's ASN (empty when unknown).
+var reASPrefix = regexp.MustCompile(`(?i)^AS\d+\s*`)
+
+// OrgName returns an ISP/org display name with any leading ASnnnn prefix removed.
+func OrgName(s string) string {
+	return strings.TrimSpace(reASPrefix.ReplaceAllString(strings.TrimSpace(s), ""))
+}
+
+// Resolver returns a display label for an IP's ISP/org (empty when unknown).
 type Resolver interface {
 	Lookup(ip string) string
 }
@@ -93,12 +101,9 @@ func (r *AsipResolver) fetch(ip string) string {
 	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
 		return ""
 	}
-	if body.ASN <= 0 {
+	name := OrgName(body.AS)
+	if name == "" {
 		return ""
 	}
-	asName := strings.TrimSpace(body.AS)
-	if asName == "" {
-		return fmt.Sprintf("AS%d", body.ASN)
-	}
-	return fmt.Sprintf("AS%d %s", body.ASN, asName)
+	return name
 }

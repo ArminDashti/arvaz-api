@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ArminDashti/arvaz-api/internal/asn"
 	"github.com/ArminDashti/arvaz-api/internal/auth"
 	"github.com/ArminDashti/arvaz-api/internal/config"
 	"github.com/ArminDashti/arvaz-api/internal/dockerx"
@@ -65,6 +66,7 @@ func (s *Server) Router() *gin.Engine {
 		protected.POST("/mullvad/speedtest", s.postMullvadSpeedtest)
 		protected.GET("/softether/sessions", s.getSoftEtherSessions)
 		protected.GET("/softether/users", s.getSoftEtherUsers)
+		protected.GET("/softether/users/:username/sessions", s.getSoftEtherUserSessions)
 	}
 	return r
 }
@@ -167,9 +169,10 @@ func (s *Server) postMullvadAnti(c *gin.Context) {
 func (s *Server) postMullvadPing(c *gin.Context) {
 	var req struct {
 		Target string `json:"target"`
+		Count  int    `json:"count"`
 	}
 	_ = c.ShouldBindJSON(&req)
-	res, err := s.mullvad.Ping(c.Request.Context(), req.Target)
+	res, err := s.mullvad.Ping(c.Request.Context(), req.Target, req.Count)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"error": err.Error()})
 		return
@@ -227,20 +230,19 @@ func (s *Server) getSoftEtherUsers(c *gin.Context) {
 
 	out := make([]softether.HubUser, 0, len(users))
 	for _, u := range users {
-		row := softether.HubUser{
-			Username:  u.Username,
-			NumLogins: u.NumLogins,
-			LastLogin: u.LastLogin,
-		}
+		row := u
+		row.LastISP = asn.OrgName(row.LastISP)
 		if st, ok := stats[u.Username]; ok {
-			if row.DownloadBytes == 0 {
+			if row.DownloadBytes == 0 && row.UploadBytes == 0 {
 				row.DownloadBytes = st.DownloadBytes
-			}
-			if row.UploadBytes == 0 {
 				row.UploadBytes = st.UploadBytes
 			}
-			row.LastIP = st.ClientIP
-			row.LastASN = st.ASN
+			if row.LastIP == "" {
+				row.LastIP = st.ClientIP
+			}
+			if row.LastISP == "" {
+				row.LastISP = st.ISP
+			}
 		}
 		// Prefer live public IP from online enrichment when stats still hold a private bridge IP.
 		if row.LastIP != "" && strings.HasPrefix(row.LastIP, "172.") {
@@ -249,4 +251,22 @@ func (s *Server) getSoftEtherUsers(c *gin.Context) {
 		out = append(out, row)
 	}
 	c.JSON(http.StatusOK, gin.H{"users": out})
+}
+
+func (s *Server) getSoftEtherUserSessions(c *gin.Context) {
+	if s.store == nil {
+		c.JSON(http.StatusOK, gin.H{"sessions": []any{}, "error": "store unavailable"})
+		return
+	}
+	username := strings.TrimSpace(c.Param("username"))
+	if username == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "username required"})
+		return
+	}
+	sessions, err := s.store.ListSessionsByUsername(c.Request.Context(), username)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"sessions": []any{}, "error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"username": username, "sessions": sessions})
 }
