@@ -75,3 +75,20 @@ Number of Logins                                | 12
 		t.Fatalf("got numLogins=%d", u.NumLogins)
 	}
 }
+
+func TestParseTrafficUnitSuffixes(t *testing.T) {
+	block := `
+Outgoing Data Size                              | 1.23 GBytes
+Incoming Data Size                              | 450.5 MBytes
+`
+	dl, ul := parseTraffic(block)
+	if dl != 1_230_000_000 || ul != 450_500_000 {
+		t.Fatalf("got download=%d upload=%d", dl, ul)
+	}
+}
+
+func TestParseSizeValueCommaBytes(t *testing.T) {
+	if n := parseSizeValue("1,000,000 bytes"); n != 1_000_000 {
+		t.Fatalf("got %d", n)
+	}
+}

@@ -221,13 +221,13 @@ var (
 	reConnectionName = regexp.MustCompile(`(?i)Connection\s*Name\s*\|\s*(.+)`)
 	reIPField        = regexp.MustCompile(`(?i)(Client\s*IP(?:\s*Address)?|Source\s*IP(?:\s*Address)?|Source\s*Host\s*Name)\s*\|\s*(.+)`)
 	reAnyIPv4        = regexp.MustCompile(`\b((?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d))(?:[:/]\d+)?\b`)
-	reTransferBytes  = regexp.MustCompile(`(?i)Transfer\s*Bytes\s*\|\s*([0-9,]+)`)
-	reOutgoingData   = regexp.MustCompile(`(?i)Outgoing\s*Data\s*Size\s*\|\s*([0-9,]+)`)
-	reIncomingData   = regexp.MustCompile(`(?i)Incoming\s*Data\s*Size\s*\|\s*([0-9,]+)`)
-	reOutgoingUni    = regexp.MustCompile(`(?i)Outgoing\s*Unicast\s*Total\s*Size\s*\|\s*([0-9,]+)`)
-	reIncomingUni    = regexp.MustCompile(`(?i)Incoming\s*Unicast\s*Total\s*Size\s*\|\s*([0-9,]+)`)
-	reOutgoingBcast  = regexp.MustCompile(`(?i)Outgoing\s*Broadcast\s*Total\s*Size\s*\|\s*([0-9,]+)`)
-	reIncomingBcast  = regexp.MustCompile(`(?i)Incoming\s*Broadcast\s*Total\s*Size\s*\|\s*([0-9,]+)`)
+	reTransferBytes  = regexp.MustCompile(`(?i)Transfer\s*Bytes\s*\|\s*(.+)`)
+	reOutgoingData   = regexp.MustCompile(`(?i)Outgoing\s*Data\s*Size\s*\|\s*(.+)`)
+	reIncomingData   = regexp.MustCompile(`(?i)Incoming\s*Data\s*Size\s*\|\s*(.+)`)
+	reOutgoingUni    = regexp.MustCompile(`(?i)Outgoing\s*Unicast\s*Total\s*Size\s*\|\s*(.+)`)
+	reIncomingUni    = regexp.MustCompile(`(?i)Incoming\s*Unicast\s*Total\s*Size\s*\|\s*(.+)`)
+	reOutgoingBcast  = regexp.MustCompile(`(?i)Outgoing\s*Broadcast\s*Total\s*Size\s*\|\s*(.+)`)
+	reIncomingBcast  = regexp.MustCompile(`(?i)Incoming\s*Broadcast\s*Total\s*Size\s*\|\s*(.+)`)
 	reConnStarted    = regexp.MustCompile(`(?i)(Connection\s*Started\s*at|Current\s*Session\s*has\s*been\s*Established\s*since|First\s*Session\s*has\s*been\s*Established\s*since)\s*\|\s*(.+)`)
 	reDuration       = regexp.MustCompile(`(?i)(Session\s*Duration|Connection\s*Time|Time\s*Connected|Duration)\s*\|\s*(.+)`)
 	reNumLogins      = regexp.MustCompile(`(?i)Num(?:ber)?\s*of\s*Logins\s*\|\s*([0-9,]+)`)
@@ -365,7 +365,7 @@ func parseUserList(raw string) []HubUser {
 		if group == "-" {
 			group = ""
 		}
-		transfer := parseUintComma(matchFirst(reTransferBytes, block))
+		transfer := parseSizeValue(matchFirst(reTransferBytes, block))
 		out = append(out, HubUser{
 			Username:      user,
 			GroupName:     group,
@@ -442,17 +442,17 @@ func isPublicIP(s string) bool {
 // Prefers Data Size; otherwise Unicast Total Size + Broadcast Total Size.
 // Packet-count lines are ignored.
 func parseTraffic(block string) (download, upload uint64) {
-	outData := parseUintComma(matchFirst(reOutgoingData, block))
-	inData := parseUintComma(matchFirst(reIncomingData, block))
+	outData := parseSizeValue(matchFirst(reOutgoingData, block))
+	inData := parseSizeValue(matchFirst(reIncomingData, block))
 	if outData > 0 || inData > 0 {
 		return outData, inData
 	}
-	out := parseUintComma(matchFirst(reOutgoingUni, block)) + parseUintComma(matchFirst(reOutgoingBcast, block))
-	in := parseUintComma(matchFirst(reIncomingUni, block)) + parseUintComma(matchFirst(reIncomingBcast, block))
+	out := parseSizeValue(matchFirst(reOutgoingUni, block)) + parseSizeValue(matchFirst(reOutgoingBcast, block))
+	in := parseSizeValue(matchFirst(reIncomingUni, block)) + parseSizeValue(matchFirst(reIncomingBcast, block))
 	if out > 0 || in > 0 {
 		return out, in
 	}
-	if n := parseUintComma(matchFirst(reTransferBytes, block)); n > 0 {
+	if n := parseSizeValue(matchFirst(reTransferBytes, block)); n > 0 {
 		return n, 0
 	}
 	return 0, 0
@@ -557,14 +557,51 @@ func matchFirstGroup(re *regexp.Regexp, block string, group int) string {
 }
 
 func parseUintComma(s string) uint64 {
-	s = strings.ReplaceAll(strings.TrimSpace(s), ",", "")
-	s = strings.TrimSuffix(strings.ToLower(s), " bytes")
+	return parseSizeValue(s)
+}
+
+var reSizeValue = regexp.MustCompile(`(?i)^\s*([0-9]+(?:\.[0-9]+)?)\s*([KMGT]i?B(?:ytes?)?)?`)
+var reThousandsComma = regexp.MustCompile(`(\d),(\d{3})`)
+
+func parseSizeValue(s string) uint64 {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0
 	}
-	n, _ := strconv.ParseUint(s, 10, 64)
-	return n
+	for reThousandsComma.MatchString(s) {
+		s = reThousandsComma.ReplaceAllString(s, "$1$2")
+	}
+	m := reSizeValue.FindStringSubmatch(s)
+	if len(m) < 2 {
+		return 0
+	}
+	v, err := strconv.ParseFloat(m[1], 64)
+	if err != nil || v < 0 {
+		return 0
+	}
+	unit := strings.ToLower(strings.TrimSpace(m[2]))
+	mult := 1.0
+	switch unit {
+	case "", "b", "byte", "bytes":
+		mult = 1
+	case "kb", "kbyte", "kbytes":
+		mult = 1000
+	case "kib":
+		mult = 1024
+	case "mb", "mbyte", "mbytes":
+		mult = 1_000_000
+	case "mib":
+		mult = 1024 * 1024
+	case "gb", "gbyte", "gbytes":
+		mult = 1_000_000_000
+	case "gib":
+		mult = 1024 * 1024 * 1024
+	case "tb", "tbyte", "tbytes":
+		mult = 1_000_000_000_000
+	case "tib":
+		mult = 1024 * 1024 * 1024 * 1024
+	}
+	return uint64(v*mult + 0.5)
 }
 
 func truncate(s string, n int) string {

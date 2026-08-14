@@ -233,8 +233,10 @@ func (s *Server) getSoftEtherUsers(c *gin.Context) {
 		row := u
 		row.LastISP = asn.OrgName(row.LastISP)
 		if st, ok := stats[u.Username]; ok {
-			if row.DownloadBytes == 0 && row.UploadBytes == 0 {
+			if st.DownloadBytes > row.DownloadBytes {
 				row.DownloadBytes = st.DownloadBytes
+			}
+			if st.UploadBytes > row.UploadBytes {
 				row.UploadBytes = st.UploadBytes
 			}
 			if row.LastIP == "" {

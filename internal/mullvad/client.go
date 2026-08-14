@@ -3,6 +3,7 @@ package mullvad
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -209,9 +210,9 @@ func parsePingStats(raw string) (lossPercent, avgMs float64) {
 
 func (c *Client) Speedtest(ctx context.Context, mode string) (*SpeedtestResult, error) {
 	mode = strings.TrimSpace(strings.ToLower(mode))
-	args := []string{"speedtest-cli", "--secure", "--json"}
+	args := []string{"speedtest", "--accept-license", "--accept-gdpr", "-f", "json"}
 	if mode == "single" {
-		args = []string{"speedtest-cli", "--secure", "--single", "--json"}
+		args = append(args, "--single")
 	} else {
 		mode = "parallel"
 	}
@@ -222,58 +223,109 @@ func (c *Client) Speedtest(ctx context.Context, mode string) (*SpeedtestResult, 
 	res := &SpeedtestResult{Mode: mode, Raw: strings.TrimSpace(raw)}
 	parseSpeedtestJSON(res)
 	if !res.ParsedOK {
-		// Fallback to simple text
-		simpleArgs := []string{"speedtest-cli", "--secure", "--simple"}
-		if mode == "single" {
-			simpleArgs = []string{"speedtest-cli", "--secure", "--single", "--simple"}
-		}
-		if sraw, serr := c.exec(ctx, 120*time.Second, simpleArgs...); serr == nil || sraw != "" {
-			res.Raw = strings.TrimSpace(sraw)
-			parseSpeedtestSimple(res)
-		}
+		parseSpeedtestSimple(res)
 	}
 	return res, nil
 }
 
+type ooklaSpeedtestJSON struct {
+	Ping     json.RawMessage `json:"ping"`
+	Download json.RawMessage `json:"download"`
+	Upload   json.RawMessage `json:"upload"`
+}
+
+type ooklaStream struct {
+	Bandwidth float64 `json:"bandwidth"`
+	Latency   float64 `json:"latency"`
+}
+
 func parseSpeedtestJSON(res *SpeedtestResult) {
 	raw := strings.TrimSpace(res.Raw)
-	if raw == "" || raw[0] != '{' {
+	if raw == "" {
 		return
 	}
-	// Minimal parse without encoding/json import churn for nested fields.
-	// speedtest-cli JSON: download/upload in bit/s, ping in ms.
-	reNum := func(key string) float64 {
-		m := regexp.MustCompile(`"` + key + `"\s*:\s*([0-9.]+)`).FindStringSubmatch(raw)
-		if len(m) < 2 {
-			return 0
+	start := strings.Index(raw, "{")
+	end := strings.LastIndex(raw, "}")
+	if start < 0 || end <= start {
+		return
+	}
+	blob := raw[start : end+1]
+	var parsed ooklaSpeedtestJSON
+	if err := json.Unmarshal([]byte(blob), &parsed); err != nil {
+		return
+	}
+	dlBw, dlOk := parseOoklaBandwidth(parsed.Download)
+	ulBw, ulOk := parseOoklaBandwidth(parsed.Upload)
+	lat, latOk := parseOoklaLatency(parsed.Ping)
+	if dlOk || ulOk || latOk {
+		if dlOk {
+			res.DownloadMbps = dlBw
 		}
-		v, _ := strconv.ParseFloat(m[1], 64)
-		return v
+		if ulOk {
+			res.UploadMbps = ulBw
+		}
+		if latOk {
+			res.LatencyMs = lat
+		}
+		res.ParsedOK = true
 	}
-	dl := reNum("download")
-	ul := reNum("upload")
-	ping := reNum("ping")
-	if dl == 0 && ul == 0 && ping == 0 {
-		return
+}
+
+func parseOoklaBandwidth(raw json.RawMessage) (mbps float64, ok bool) {
+	raw = json.RawMessage(bytes.TrimSpace(raw))
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, false
 	}
-	res.DownloadMbps = dl / 1_000_000
-	res.UploadMbps = ul / 1_000_000
-	res.LatencyMs = ping
-	res.ParsedOK = true
+	if raw[0] == '{' {
+		var stream ooklaStream
+		if err := json.Unmarshal(raw, &stream); err != nil {
+			return 0, false
+		}
+		if stream.Bandwidth <= 0 {
+			return 0, false
+		}
+		return stream.Bandwidth * 8 / 1_000_000, true
+	}
+	var bits float64
+	if err := json.Unmarshal(raw, &bits); err != nil || bits <= 0 {
+		return 0, false
+	}
+	return bits / 1_000_000, true
+}
+
+func parseOoklaLatency(raw json.RawMessage) (ms float64, ok bool) {
+	raw = json.RawMessage(bytes.TrimSpace(raw))
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, false
+	}
+	if raw[0] == '{' {
+		var stream ooklaStream
+		if err := json.Unmarshal(raw, &stream); err != nil {
+			return 0, false
+		}
+		if stream.Latency <= 0 {
+			return 0, false
+		}
+		return stream.Latency, true
+	}
+	var ping float64
+	if err := json.Unmarshal(raw, &ping); err != nil || ping <= 0 {
+		return 0, false
+	}
+	return ping, true
 }
 
 func parseSpeedtestSimple(res *SpeedtestResult) {
-	// Ping: 12.3 ms / Download: 45.6 Mbit/s / Upload: 12.3 Mbit/s
+	// Official human: "Download:    94.21 Mbps" / unofficial: "Download: 45.6 Mbit/s"
+	re := regexp.MustCompile(`(?i)(ping|latency|download|upload):\s*([0-9.]+)`)
 	for _, line := range strings.Split(res.Raw, "\n") {
-		low := strings.ToLower(strings.TrimSpace(line))
-		re := regexp.MustCompile(`(?i)(ping|download|upload):\s*([0-9.]+)`)
-		m := re.FindStringSubmatch(low)
+		m := re.FindStringSubmatch(strings.TrimSpace(line))
 		if len(m) < 3 {
 			continue
 		}
 		v, _ := strconv.ParseFloat(m[2], 64)
-		switch m[1] {
-		case "ping":
+		switch strings.ToLower(m[1]) {
+		case "ping", "latency":
 			res.LatencyMs = v
 		case "download":
 			res.DownloadMbps = v
