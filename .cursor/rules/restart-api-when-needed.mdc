@@ -1,0 +1,29 @@
+---
+description: Restart the local API process whenever a change would not take effect without it
+alwaysApply: true
+---
+
+# Restart API when needed
+
+After you change this `*-api` project, restart the **local** API process whenever the running server would otherwise keep serving old behavior.
+
+## When to restart
+
+Restart without waiting to be asked when any of these is true:
+
+1. You changed handlers, routes, middleware, models, migrations, schema, config, env, or dependencies.
+2. The stack has no hot reload, or hot reload did not pick up the change (compiled binary, `.env`, some config files).
+3. The API process crashed, is not listening, or still returns the pre-change response after a code fix.
+4. The user will test the API or WebUI against this backend in the same turn.
+
+## When not to restart
+
+1. Docs, comments, unused files, or WebUI-only edits.
+2. You already restarted this process in the same turn for the same change.
+3. Remote, Docker production, or a host the user did not ask to touch.
+
+## How
+
+1. Reuse this project's existing local run path (watch command, `air`, `uvicorn --reload`, `runserver`, or the command already in the terminal).
+2. Stop only this project's local API process, then start it again on the same safe port it was using.
+3. Confirm it is listening before you tell the user the change is live.
