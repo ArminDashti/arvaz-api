@@ -35,6 +35,7 @@ Thumbs.db
 # === auto-managed large files (>5MB) ===
 
 # BEGIN AUTO-MANAGED LARGE FILES (>5MB)
+.armin/docker-data/postgres/pg_wal/000000010000000000000001
 # END AUTO-MANAGED LARGE FILES
 
 # === auto-managed large files (github-commit-push-all) ===

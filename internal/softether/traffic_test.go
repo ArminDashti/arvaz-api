@@ -13,7 +13,7 @@ Outgoing Unicast Total Size                     | 9 bytes
 Incoming Unicast Total Size                     | 9 bytes
 `
 	dl, ul := parseTraffic(block)
-	if dl != 1_000_000 || ul != 250_000 {
+	if dl != 250_000 || ul != 1_000_000 {
 		t.Fatalf("got download=%d upload=%d", dl, ul)
 	}
 }
@@ -30,7 +30,7 @@ Incoming Broadcast Packets                      | 1
 Incoming Broadcast Total Size                   | 50 bytes
 `
 	dl, ul := parseTraffic(block)
-	if dl != 1_100 || ul != 550 {
+	if dl != 550 || ul != 1_100 {
 		t.Fatalf("got download=%d upload=%d", dl, ul)
 	}
 }
@@ -68,7 +68,7 @@ Outgoing Broadcast Total Size                   | 200 bytes
 Incoming Broadcast Total Size                   | 50 bytes
 Number of Logins                                | 12
 `)
-	if u.DownloadBytes != 2_200 || u.UploadBytes != 850 {
+	if u.DownloadBytes != 850 || u.UploadBytes != 2_200 {
 		t.Fatalf("got download=%d upload=%d", u.DownloadBytes, u.UploadBytes)
 	}
 	if u.NumLogins != 12 {
@@ -82,7 +82,7 @@ Outgoing Data Size                              | 1.23 GBytes
 Incoming Data Size                              | 450.5 MBytes
 `
 	dl, ul := parseTraffic(block)
-	if dl != 1_230_000_000 || ul != 450_500_000 {
+	if dl != 450_500_000 || ul != 1_230_000_000 {
 		t.Fatalf("got download=%d upload=%d", dl, ul)
 	}
 }

@@ -70,7 +70,11 @@ func (s *Store) Close() {
 }
 
 func (s *Store) Migrate(ctx context.Context) error {
-	for _, name := range []string{"migrations/001_softether.sql", "migrations/002_users.sql"} {
+	for _, name := range []string{
+		"migrations/001_softether.sql",
+		"migrations/002_users.sql",
+		"migrations/003_swap_traffic_polarity.sql",
+	} {
 		sqlBytes, err := migrationFS.ReadFile(name)
 		if err != nil {
 			return err

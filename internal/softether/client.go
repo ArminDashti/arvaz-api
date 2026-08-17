@@ -438,19 +438,19 @@ func isPublicIP(s string) bool {
 	return true
 }
 
-// parseTraffic returns client download (SoftEther outgoing) and upload (incoming).
+// parseTraffic returns client download (SoftEther incoming) and upload (outgoing).
 // Prefers Data Size; otherwise Unicast Total Size + Broadcast Total Size.
 // Packet-count lines are ignored.
 func parseTraffic(block string) (download, upload uint64) {
 	outData := parseSizeValue(matchFirst(reOutgoingData, block))
 	inData := parseSizeValue(matchFirst(reIncomingData, block))
 	if outData > 0 || inData > 0 {
-		return outData, inData
+		return inData, outData
 	}
 	out := parseSizeValue(matchFirst(reOutgoingUni, block)) + parseSizeValue(matchFirst(reOutgoingBcast, block))
 	in := parseSizeValue(matchFirst(reIncomingUni, block)) + parseSizeValue(matchFirst(reIncomingBcast, block))
 	if out > 0 || in > 0 {
-		return out, in
+		return in, out
 	}
 	if n := parseSizeValue(matchFirst(reTransferBytes, block)); n > 0 {
 		return n, 0
