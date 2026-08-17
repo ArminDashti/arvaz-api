@@ -37,6 +37,7 @@ type UserStat struct {
 }
 
 type SessionLog struct {
+	Username        string     `json:"username,omitempty"`
 	DownloadBytes   uint64     `json:"downloadBytes"`
 	UploadBytes     uint64     `json:"uploadBytes"`
 	ClientIP        string     `json:"ip"`
@@ -44,6 +45,7 @@ type SessionLog struct {
 	DurationSeconds int64      `json:"durationSeconds"`
 	ConnectedAt     time.Time  `json:"connectedAt"`
 	DisconnectedAt  *time.Time `json:"disconnectedAt,omitempty"`
+	IspLogo         string     `json:"ispLogo,omitempty"`
 }
 
 func Connect(ctx context.Context, databaseURL string) (*Store, error) {
@@ -74,6 +76,7 @@ func (s *Store) Migrate(ctx context.Context) error {
 		"migrations/001_softether.sql",
 		"migrations/002_users.sql",
 		"migrations/003_swap_traffic_polarity.sql",
+		"migrations/004_softether_ip_index.sql",
 	} {
 		sqlBytes, err := migrationFS.ReadFile(name)
 		if err != nil {
@@ -248,6 +251,31 @@ func (s *Store) ListSessionsByUsername(ctx context.Context, username string) ([]
 		var row SessionLog
 		var rawISP string
 		if err := rows.Scan(&row.DownloadBytes, &row.UploadBytes, &row.ClientIP, &rawISP, &row.DurationSeconds, &row.ConnectedAt, &row.DisconnectedAt); err != nil {
+			return nil, err
+		}
+		row.ISP = asn.OrgName(rawISP)
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListSessionsByIP(ctx context.Context, ip string) ([]SessionLog, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT username, COALESCE(download_bytes, 0), COALESCE(upload_bytes, 0), COALESCE(client_ip, ''), COALESCE(asn, ''),
+		       duration_seconds, connected_at, disconnected_at
+		FROM softether_sessions
+		WHERE client_ip = $1
+		ORDER BY connected_at DESC
+	`, ip)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SessionLog{}
+	for rows.Next() {
+		var row SessionLog
+		var rawISP string
+		if err := rows.Scan(&row.Username, &row.DownloadBytes, &row.UploadBytes, &row.ClientIP, &rawISP, &row.DurationSeconds, &row.ConnectedAt, &row.DisconnectedAt); err != nil {
 			return nil, err
 		}
 		row.ISP = asn.OrgName(rawISP)

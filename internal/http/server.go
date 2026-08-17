@@ -65,6 +65,7 @@ func (s *Server) Router() *gin.Engine {
 		protected.POST("/mullvad/ping", s.postMullvadPing)
 		protected.POST("/mullvad/speedtest", s.postMullvadSpeedtest)
 		protected.GET("/softether/sessions", s.getSoftEtherSessions)
+		protected.GET("/softether/ip-sessions", s.getSoftEtherIpSessions)
 		protected.GET("/softether/users", s.getSoftEtherUsers)
 		protected.GET("/softether/users/:username/sessions", s.getSoftEtherUserSessions)
 	}
@@ -207,6 +208,9 @@ func (s *Server) getSoftEtherSessions(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"sessions": []any{}, "error": err.Error()})
 		return
 	}
+	for i := range sessions {
+		sessions[i].LastISP, sessions[i].IspLogo = asn.WithLogo(sessions[i].LastISP)
+	}
 	c.JSON(http.StatusOK, gin.H{"sessions": sessions})
 }
 
@@ -231,7 +235,7 @@ func (s *Server) getSoftEtherUsers(c *gin.Context) {
 	out := make([]softether.HubUser, 0, len(users))
 	for _, u := range users {
 		row := u
-		row.LastISP = asn.OrgName(row.LastISP)
+		row.LastISP, row.IspLogo = asn.WithLogo(row.LastISP)
 		if st, ok := stats[u.Username]; ok {
 			if st.DownloadBytes > row.DownloadBytes {
 				row.DownloadBytes = st.DownloadBytes
@@ -243,7 +247,7 @@ func (s *Server) getSoftEtherUsers(c *gin.Context) {
 				row.LastIP = st.ClientIP
 			}
 			if row.LastISP == "" {
-				row.LastISP = st.ISP
+				row.LastISP, row.IspLogo = asn.WithLogo(st.ISP)
 			}
 		}
 		// Prefer live public IP from online enrichment when stats still hold a private bridge IP.
@@ -270,5 +274,29 @@ func (s *Server) getSoftEtherUserSessions(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"sessions": []any{}, "error": err.Error()})
 		return
 	}
+	for i := range sessions {
+		sessions[i].ISP, sessions[i].IspLogo = asn.WithLogo(sessions[i].ISP)
+	}
 	c.JSON(http.StatusOK, gin.H{"username": username, "sessions": sessions})
+}
+
+func (s *Server) getSoftEtherIpSessions(c *gin.Context) {
+	if s.store == nil {
+		c.JSON(http.StatusOK, gin.H{"sessions": []any{}, "error": "store unavailable"})
+		return
+	}
+	ip := strings.TrimSpace(c.Query("ip"))
+	if ip == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ip required"})
+		return
+	}
+	sessions, err := s.store.ListSessionsByIP(c.Request.Context(), ip)
+	if err != nil {
+		c.JSON(http.StatusOK, gin.H{"ip": ip, "sessions": []any{}, "error": err.Error()})
+		return
+	}
+	for i := range sessions {
+		sessions[i].ISP, sessions[i].IspLogo = asn.WithLogo(sessions[i].ISP)
+	}
+	c.JSON(http.StatusOK, gin.H{"ip": ip, "sessions": sessions})
 }

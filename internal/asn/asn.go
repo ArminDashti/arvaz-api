@@ -18,6 +18,45 @@ func OrgName(s string) string {
 	return strings.TrimSpace(reASPrefix.ReplaceAllString(strings.TrimSpace(s), ""))
 }
 
+// LogoKey returns a stable filename stem for a known Iranian ISP, or empty.
+func LogoKey(org string) string {
+	n := strings.ToLower(OrgName(org))
+	n = strings.ReplaceAll(n, "\u2019", "'")
+	n = strings.ReplaceAll(n, "`", "'")
+	switch {
+	case strings.Contains(n, "zitel"),
+		strings.Contains(n, "pasargad arian"),
+		strings.Contains(n, "tose'h fanavari"),
+		strings.Contains(n, "toseh fanavari"):
+		return "zitel"
+	case strings.Contains(n, "irancell"),
+		strings.Contains(n, "iran cell"):
+		return "irancell"
+	case strings.Contains(n, "mobin net"),
+		strings.Contains(n, "mobinnet"):
+		return "mobin-net"
+	case strings.Contains(n, "mobile communication company of iran"),
+		strings.Contains(n, "hamrah-e"),
+		strings.Contains(n, "hamrahe aval"),
+		n == "mci",
+		strings.HasPrefix(n, "mci "):
+		return "mci"
+	case strings.Contains(n, "respina"):
+		return "respina"
+	default:
+		return ""
+	}
+}
+
+// WithLogo returns the cleaned org name and a logo key when the ISP is known.
+func WithLogo(org string) (name, logo string) {
+	name = OrgName(org)
+	if name == "" {
+		return "", ""
+	}
+	return name, LogoKey(name)
+}
+
 // Resolver returns a display label for an IP's ISP/org (empty when unknown).
 type Resolver interface {
 	Lookup(ip string) string

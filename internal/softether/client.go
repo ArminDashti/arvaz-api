@@ -20,6 +20,7 @@ type OnlineSession struct {
 	Username               string     `json:"username"`
 	ClientIP               string     `json:"clientIp"`
 	LastISP                string     `json:"lastIsp,omitempty"`
+	IspLogo                string     `json:"ispLogo,omitempty"`
 	SessionName            string     `json:"sessionName,omitempty"`
 	ConnectionName         string     `json:"connectionName,omitempty"`
 	DownloadBytes          uint64     `json:"downloadBytes"`
@@ -38,6 +39,7 @@ type HubUser struct {
 	UploadBytes   uint64 `json:"uploadBytes"`
 	LastIP        string `json:"lastIp,omitempty"`
 	LastISP       string `json:"lastIsp,omitempty"`
+	IspLogo       string `json:"ispLogo,omitempty"`
 	GroupName     string `json:"groupName,omitempty"`
 	AuthMethod    string `json:"authMethod,omitempty"`
 	TransferBytes uint64 `json:"transferBytes,omitempty"`
