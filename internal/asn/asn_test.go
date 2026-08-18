@@ -24,6 +24,7 @@ func TestLogoKey(t *testing.T) {
 		"AS58224 Iran Cell Service and Communication Company":   "irancell",
 		"Mobin Net Communication Company (Private Joint Stock)": "mobin-net",
 		"Mobile Communication Company of Iran PLC":              "mci",
+		"Mobile Telecommunication Company of Iran":              "mci",
 		"MCI":     "mci",
 		"Respina": "respina",
 		"GOOGLE":  "",

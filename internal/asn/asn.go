@@ -36,6 +36,7 @@ func LogoKey(org string) string {
 		strings.Contains(n, "mobinnet"):
 		return "mobin-net"
 	case strings.Contains(n, "mobile communication company of iran"),
+		strings.Contains(n, "mobile telecommunication"),
 		strings.Contains(n, "hamrah-e"),
 		strings.Contains(n, "hamrahe aval"),
 		n == "mci",
