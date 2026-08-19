@@ -134,7 +134,7 @@ func (c *Client) ListOnlineSessions(ctx context.Context) ([]OnlineSession, error
 				s.LastISP = label
 			}
 		}
-		s.SessionKey = s.Username + "|" + s.ClientIP + "|" + s.SessionName
+		s.SessionKey = s.Username + "|" + s.SessionName
 	}
 	return sessions, nil
 }
@@ -441,18 +441,18 @@ func isPublicIP(s string) bool {
 }
 
 // parseTraffic returns client download (SoftEther incoming) and upload (outgoing).
-// Prefers Data Size; otherwise Unicast Total Size + Broadcast Total Size.
-// Packet-count lines are ignored.
+// Prefers Unicast Total Size + Broadcast Total Size (virtual Ethernet, on SessionGet and UserGet).
+// Falls back to Data Size, then Transfer Bytes. Packet-count lines are ignored.
 func parseTraffic(block string) (download, upload uint64) {
-	outData := parseSizeValue(matchFirst(reOutgoingData, block))
-	inData := parseSizeValue(matchFirst(reIncomingData, block))
-	if outData > 0 || inData > 0 {
-		return inData, outData
-	}
 	out := parseSizeValue(matchFirst(reOutgoingUni, block)) + parseSizeValue(matchFirst(reOutgoingBcast, block))
 	in := parseSizeValue(matchFirst(reIncomingUni, block)) + parseSizeValue(matchFirst(reIncomingBcast, block))
 	if out > 0 || in > 0 {
 		return in, out
+	}
+	outData := parseSizeValue(matchFirst(reOutgoingData, block))
+	inData := parseSizeValue(matchFirst(reIncomingData, block))
+	if outData > 0 || inData > 0 {
+		return inData, outData
 	}
 	if n := parseSizeValue(matchFirst(reTransferBytes, block)); n > 0 {
 		return n, 0
@@ -583,24 +583,17 @@ func parseSizeValue(s string) uint64 {
 	}
 	unit := strings.ToLower(strings.TrimSpace(m[2]))
 	mult := 1.0
+	// SoftEther ToStrByte uses 1024 for KB/MB/GB/TB (and KBytes/MBytes/…).
 	switch unit {
 	case "", "b", "byte", "bytes":
 		mult = 1
-	case "kb", "kbyte", "kbytes":
-		mult = 1000
-	case "kib":
+	case "kb", "kbyte", "kbytes", "kib":
 		mult = 1024
-	case "mb", "mbyte", "mbytes":
-		mult = 1_000_000
-	case "mib":
+	case "mb", "mbyte", "mbytes", "mib":
 		mult = 1024 * 1024
-	case "gb", "gbyte", "gbytes":
-		mult = 1_000_000_000
-	case "gib":
+	case "gb", "gbyte", "gbytes", "gib":
 		mult = 1024 * 1024 * 1024
-	case "tb", "tbyte", "tbytes":
-		mult = 1_000_000_000_000
-	case "tib":
+	case "tb", "tbyte", "tbytes", "tib":
 		mult = 1024 * 1024 * 1024 * 1024
 	}
 	return uint64(v*mult + 0.5)

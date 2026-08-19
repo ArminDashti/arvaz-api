@@ -1,0 +1,8 @@
+# T3 overlay: HAProxy config bind for container URL inventory.
+# Copied to volume_dir and applied by run-on-docker-server.ps1 when present.
+
+services:
+  arvaz-api:
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /cloud-admin/docker-volumes/reverse-proxy/haproxy/config/haproxy.cfg:/haproxy/haproxy.cfg:ro

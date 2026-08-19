@@ -1,0 +1,12 @@
+stack_name: arvaz-api
+image_tag: arvaz-api:latest
+compose_file: ../../docker-compose.yml
+dockerfile: ../../dockerfile
+docker_network: t3-net
+internal_port: "8090"
+publish_port: ""
+delete_volume: "no"
+delete_image: "yes"
+build_image_on: "local"
+ssh: "ssh t3"
+volume_dir: "/cloud-admin/docker-volumes/arvaz-api"

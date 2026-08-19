@@ -29,6 +29,7 @@ type Status struct {
 	Relay           string `json:"relay"`
 	RelayIP         string `json:"relayIp,omitempty"`
 	VisibleLocation string `json:"visibleLocation"`
+	PublicIP        string `json:"publicIp,omitempty"`
 	Country         string `json:"country,omitempty"`
 	City            string `json:"city,omitempty"`
 	Features        string `json:"features"`
@@ -63,13 +64,21 @@ type SpeedtestResult struct {
 }
 
 var (
-	reCountry = regexp.MustCompile(`^([A-Za-z].*?)\s+\(([a-z]{2})\)$`)
-	reCity    = regexp.MustCompile(`^\t([^\t@]+?)\s+\(([a-z]+)\)\s+@`)
-	reHost    = regexp.MustCompile(`^\t\t([a-z0-9-]+)\s+\(([0-9.]+)`)
-	reRelay   = regexp.MustCompile(`(?i)Relay:\s+(\S+)`)
-	reLoc     = regexp.MustCompile(`(?i)Visible location:\s+(.+)`)
-	reFeat    = regexp.MustCompile(`(?i)Features:\s+(.+)`)
+	reCountry    = regexp.MustCompile(`^([A-Za-z].*?)\s+\(([a-z]{2})\)$`)
+	reCity       = regexp.MustCompile(`^\t([^\t@]+?)\s+\(([a-z]+)\)\s+@`)
+	reHost       = regexp.MustCompile(`^\t\t([a-z0-9-]+)\s+\(([0-9.]+)`)
+	reRelay      = regexp.MustCompile(`(?i)Relay:\s+(\S+)`)
+	reLoc        = regexp.MustCompile(`(?i)Visible location:\s+(.+)`)
+	reFeat       = regexp.MustCompile(`(?i)Features:\s+(.+)`)
+	rePublicIPv4 = regexp.MustCompile(`(?i)IPv4:\s*([0-9.]+)`)
 )
+
+func parseVisibleIPv4(visible string) string {
+	if m := rePublicIPv4.FindStringSubmatch(visible); len(m) == 2 {
+		return strings.TrimSpace(m[1])
+	}
+	return ""
+}
 
 func (c *Client) Status(ctx context.Context) (*Status, error) {
 	raw, err := c.exec(ctx, 20*time.Second, "mullvad", "status", "-v")
@@ -92,6 +101,7 @@ func (c *Client) Status(ctx context.Context) (*Status, error) {
 	}
 	if m := reLoc.FindStringSubmatch(raw); len(m) == 2 {
 		st.VisibleLocation = strings.TrimSpace(m[1])
+		st.PublicIP = parseVisibleIPv4(st.VisibleLocation)
 		// Sweden, Stockholm. IPv4: ...
 		loc := st.VisibleLocation
 		if i := strings.Index(loc, ". IPv4"); i >= 0 {
@@ -169,8 +179,8 @@ func (c *Client) Ping(ctx context.Context, target string, count int) (*PingResul
 	if count < 1 {
 		count = 4
 	}
-	if count > 20 {
-		count = 20
+	if count > 128 {
+		count = 128
 	}
 	timeout := time.Duration(count*2+10) * time.Second
 	if timeout < 20*time.Second {
@@ -210,7 +220,7 @@ func parsePingStats(raw string) (lossPercent, avgMs float64) {
 
 func (c *Client) Speedtest(ctx context.Context, mode string) (*SpeedtestResult, error) {
 	mode = strings.TrimSpace(strings.ToLower(mode))
-	args := []string{"speedtest", "--accept-license", "--accept-gdpr", "-f", "json"}
+	args := []string{"speedtest", "--accept-license", "--accept-gdpr", "--progress=no", "-f", "json"}
 	if mode == "single" {
 		args = append(args, "--single")
 	} else {
@@ -234,9 +244,12 @@ type ooklaSpeedtestJSON struct {
 	Upload   json.RawMessage `json:"upload"`
 }
 
-type ooklaStream struct {
+type ooklaBandwidth struct {
 	Bandwidth float64 `json:"bandwidth"`
-	Latency   float64 `json:"latency"`
+}
+
+type ooklaPing struct {
+	Latency float64 `json:"latency"`
 }
 
 func parseSpeedtestJSON(res *SpeedtestResult) {
@@ -277,7 +290,7 @@ func parseOoklaBandwidth(raw json.RawMessage) (mbps float64, ok bool) {
 		return 0, false
 	}
 	if raw[0] == '{' {
-		var stream ooklaStream
+		var stream ooklaBandwidth
 		if err := json.Unmarshal(raw, &stream); err != nil {
 			return 0, false
 		}
@@ -299,14 +312,14 @@ func parseOoklaLatency(raw json.RawMessage) (ms float64, ok bool) {
 		return 0, false
 	}
 	if raw[0] == '{' {
-		var stream ooklaStream
-		if err := json.Unmarshal(raw, &stream); err != nil {
+		var ping ooklaPing
+		if err := json.Unmarshal(raw, &ping); err != nil {
 			return 0, false
 		}
-		if stream.Latency <= 0 {
+		if ping.Latency <= 0 {
 			return 0, false
 		}
-		return stream.Latency, true
+		return ping.Latency, true
 	}
 	var ping float64
 	if err := json.Unmarshal(raw, &ping); err != nil || ping <= 0 {

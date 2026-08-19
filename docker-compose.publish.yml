@@ -1,0 +1,9 @@
+# Optional overlay: host port publish (local / explicit publish_port).
+# Scripts add -f docker-compose.publish.yml only when publish_port is non-empty.
+
+services:
+  arvaz-api:
+    ports:
+      - target: 8090
+        published: ${PUBLISH_PORT:-8090}
+        protocol: tcp

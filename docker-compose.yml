@@ -1,17 +1,61 @@
+name: arvaz-api
+
 services:
-  postgres:
+  arvaz-pgsql:
     image: postgres:16-alpine
-    container_name: arvaz-postgres
+    container_name: arvaz-pgsql
     environment:
       POSTGRES_USER: arvaz
       POSTGRES_PASSWORD: arvaz
       POSTGRES_DB: arvaz
-    ports:
-      - "55433:5432"
     volumes:
-      - ./.armin/docker-data/postgres:/var/lib/postgresql/data
+      - arvaz-pgdata:/var/lib/postgresql/data
+    expose:
+      - "5432"
+    networks:
+      - t3-net
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U arvaz -d arvaz"]
       interval: 5s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
+
+  arvaz-api:
+    image: ${IMAGE_TAG:-arvaz-api:latest}
+    container_name: arvaz-api
+    expose:
+      - "8090"
+    environment:
+      HTTP_ADDR: 0.0.0.0:8090
+      DATABASE_URL: postgres://arvaz:arvaz@arvaz-pgsql:5432/arvaz?sslmode=disable
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://127.0.0.1:5173,http://localhost:5173,https://arvaz.xaigrok.ir}
+      PUBLIC_IP: ${PUBLIC_IP:-2.144.27.74}
+      HAPROXY_CONFIG_PATH: ${HAPROXY_CONFIG_PATH:-/haproxy/haproxy.cfg}
+      MULLVAD_CONTAINER: ${MULLVAD_CONTAINER:-mullvad-1}
+      SOFTETHER_CONTAINER: ${SOFTETHER_CONTAINER:-softether}
+      SOFTETHER_HUB: ${SOFTETHER_HUB:-DEFAULT}
+      SOFTETHER_ENABLED: ${SOFTETHER_ENABLED:-true}
+      SOFTETHER_VPNCMD_TIMEOUT_SECONDS: ${SOFTETHER_VPNCMD_TIMEOUT_SECONDS:-20}
+      SOFTETHER_POLL_SECONDS: ${SOFTETHER_POLL_SECONDS:-30}
+      ASIP_BASE_URL: ${ASIP_BASE_URL:-http://asip-api:3000}
+    env_file:
+      - path: api.env
+        required: false
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - t3-net
+    depends_on:
+      arvaz-pgsql:
+        condition: service_healthy
+    restart: unless-stopped
+
+networks:
+  t3-net:
+    name: ${DOCKER_NETWORK:-t3-net}
+    external: true
+
+volumes:
+  arvaz-pgdata:
+    name: arvaz-pgdata

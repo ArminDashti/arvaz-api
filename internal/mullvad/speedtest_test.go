@@ -24,6 +24,38 @@ func TestParseSpeedtestJSONOokla(t *testing.T) {
 	}
 }
 
+func TestParseSpeedtestJSONOoklaNestedLatency(t *testing.T) {
+	res := &SpeedtestResult{Raw: `{
+  "type": "result",
+  "ping": { "jitter": 0.4, "latency": 12.5 },
+  "download": {
+    "bandwidth": 12500000,
+    "bytes": 150000000,
+    "elapsed": 15000,
+    "latency": { "iqm": 11.2, "low": 8.0, "high": 20.0, "jitter": 1.1 }
+  },
+  "upload": {
+    "bandwidth": 2500000,
+    "bytes": 30000000,
+    "elapsed": 15000,
+    "latency": { "iqm": 15.0, "low": 10.0, "high": 25.0, "jitter": 2.0 }
+  }
+}`}
+	parseSpeedtestJSON(res)
+	if !res.ParsedOK {
+		t.Fatal("expected parsedOk")
+	}
+	if res.DownloadMbps != 100 {
+		t.Fatalf("download Mbps=%v want 100", res.DownloadMbps)
+	}
+	if res.UploadMbps != 20 {
+		t.Fatalf("upload Mbps=%v want 20", res.UploadMbps)
+	}
+	if res.LatencyMs != 12.5 {
+		t.Fatalf("latency=%v want 12.5", res.LatencyMs)
+	}
+}
+
 func TestParseSpeedtestJSONUnofficialBits(t *testing.T) {
 	res := &SpeedtestResult{Raw: `{"download": 45000000, "upload": 12000000, "ping": 8.2}`}
 	parseSpeedtestJSON(res)

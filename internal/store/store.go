@@ -124,7 +124,7 @@ func (s *Store) SyncOnlineSessions(ctx context.Context, sessions []softether.Onl
 	for _, sess := range sessions {
 		key := sess.SessionKey
 		if key == "" {
-			key = sess.Username + "|" + sess.ClientIP + "|" + sess.SessionName
+			key = sess.Username + "|" + sess.SessionName
 		}
 		onlineKeys = append(onlineKeys, key)
 

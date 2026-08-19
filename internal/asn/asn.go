@@ -14,8 +14,13 @@ import (
 var reASPrefix = regexp.MustCompile(`(?i)^AS\d+\s*`)
 
 // OrgName returns an ISP/org display name with any leading ASnnnn prefix removed.
+// Sentinel values such as "error" from the lookup API are treated as unknown.
 func OrgName(s string) string {
-	return strings.TrimSpace(reASPrefix.ReplaceAllString(strings.TrimSpace(s), ""))
+	name := strings.TrimSpace(reASPrefix.ReplaceAllString(strings.TrimSpace(s), ""))
+	if strings.EqualFold(name, "error") {
+		return ""
+	}
+	return name
 }
 
 // LogoKey returns a stable filename stem for a known Iranian ISP, or empty.
@@ -44,6 +49,8 @@ func LogoKey(org string) string {
 		return "mci"
 	case strings.Contains(n, "respina"):
 		return "respina"
+	case strings.Contains(n, "shatel"):
+		return "shatel"
 	default:
 		return ""
 	}
@@ -51,6 +58,10 @@ func LogoKey(org string) string {
 
 // WithLogo returns the cleaned org name and a logo key when the ISP is known.
 func WithLogo(org string) (name, logo string) {
+	trimmed := strings.TrimSpace(org)
+	if strings.EqualFold(trimmed, "error") {
+		return "ISP lookup failed", ""
+	}
 	name = OrgName(org)
 	if name == "" {
 		return "", ""
@@ -142,8 +153,11 @@ func (r *AsipResolver) fetch(ip string) string {
 		return ""
 	}
 	name := OrgName(body.AS)
-	if name == "" {
-		return ""
+	if name != "" {
+		return name
 	}
-	return name
+	if strings.EqualFold(strings.TrimSpace(body.AS), "error") {
+		return "error"
+	}
+	return ""
 }

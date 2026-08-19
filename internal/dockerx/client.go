@@ -19,6 +19,7 @@ type ContainerInfo struct {
 	MemoryBytes   uint64  `json:"memoryBytes"`
 	MemoryGB      float64 `json:"memoryGb"`
 	Network       string  `json:"network"`
+	IPPort        string  `json:"ipPort"`
 	HAProxyURL    string  `json:"haproxyUrl"`
 	UptimeSeconds int64   `json:"uptimeSeconds"`
 	State         string  `json:"state"`
@@ -89,7 +90,8 @@ func (c *Client) ListContainers(ctx context.Context) ([]ContainerInfo, error) {
 			mem = s.mem
 		}
 
-		network := formatNetworks(row.NetworkSettings.Networks)
+		network := formatNetworkNames(row.NetworkSettings.Networks)
+		ipPort := formatIPPort(row.NetworkSettings.Networks, row.NetworkSettings.Ports)
 		haproxy := routes[name]
 		if haproxy == "" {
 			haproxy = publishedHostPort(row.NetworkSettings.Ports, c.PublicIP)
@@ -105,6 +107,7 @@ func (c *Client) ListContainers(ctx context.Context) ([]ContainerInfo, error) {
 			MemoryBytes:   mem,
 			MemoryGB:      round2(float64(mem) / (1024 * 1024 * 1024)),
 			Network:       network,
+			IPPort:        ipPort,
 			HAProxyURL:    haproxy,
 			UptimeSeconds: uptime,
 			State:         state,
@@ -121,8 +124,8 @@ func (c *Client) ListContainers(ctx context.Context) ([]ContainerInfo, error) {
 }
 
 type inspectRow struct {
-	Name            string `json:"Name"`
-	Config          struct {
+	Name   string `json:"Name"`
+	Config struct {
 		Labels map[string]string `json:"Labels"`
 	} `json:"Config"`
 	State struct {
@@ -167,7 +170,7 @@ func collectAllStats(ctx context.Context) map[string]containerStat {
 	return result
 }
 
-func formatNetworks(networks map[string]struct {
+func formatNetworkNames(networks map[string]struct {
 	IPAddress string `json:"IPAddress"`
 }) string {
 	if len(networks) == 0 {
@@ -178,16 +181,85 @@ func formatNetworks(networks map[string]struct {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	parts := make([]string, 0, len(names))
+	return strings.Join(names, ", ")
+}
+
+func formatIPPort(networks map[string]struct {
+	IPAddress string `json:"IPAddress"`
+}, ports map[string][]struct {
+	HostIP   string `json:"HostIp"`
+	HostPort string `json:"HostPort"`
+}) string {
+	ip := firstContainerIP(networks)
+	port := firstContainerPort(ports)
+	if ip == "" && port == "" {
+		return "-"
+	}
+	if port == "" {
+		return ip
+	}
+	if ip == "" {
+		return port
+	}
+	return ip + ":" + port
+}
+
+func firstContainerIP(networks map[string]struct {
+	IPAddress string `json:"IPAddress"`
+}) string {
+	if len(networks) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(networks))
+	for name := range networks {
+		names = append(names, name)
+	}
+	sort.Strings(names)
 	for _, name := range names {
 		ip := strings.TrimSpace(networks[name].IPAddress)
-		if ip == "" {
-			parts = append(parts, name)
+		if ip != "" {
+			return ip
+		}
+	}
+	return ""
+}
+
+func firstContainerPort(ports map[string][]struct {
+	HostIP   string `json:"HostIp"`
+	HostPort string `json:"HostPort"`
+}) string {
+	if len(ports) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(ports))
+	for k := range ports {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	published := ""
+	anyPort := ""
+	for _, k := range keys {
+		containerPort := strings.TrimSpace(strings.SplitN(k, "/", 2)[0])
+		if containerPort == "" {
 			continue
 		}
-		parts = append(parts, name+" "+ip)
+		if anyPort == "" {
+			anyPort = containerPort
+		}
+		for _, b := range ports[k] {
+			if strings.TrimSpace(b.HostPort) != "" {
+				published = containerPort
+				break
+			}
+		}
+		if published != "" {
+			break
+		}
 	}
-	return strings.Join(parts, ", ")
+	if published != "" {
+		return published
+	}
+	return anyPort
 }
 
 func publishedHostPort(ports map[string][]struct {

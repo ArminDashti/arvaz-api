@@ -2,7 +2,7 @@ package softether
 
 import "testing"
 
-func TestParseTrafficPrefersDataSizeOverPacketCounts(t *testing.T) {
+func TestParseTrafficPrefersUnicastOverDataSize(t *testing.T) {
 	block := `
 Session Name                                    | SID-alice-1
 Outgoing Unicast Packets                        | 100
@@ -11,6 +11,18 @@ Outgoing Data Size                              | 1,000,000 bytes
 Incoming Data Size                              | 250,000 bytes
 Outgoing Unicast Total Size                     | 9 bytes
 Incoming Unicast Total Size                     | 9 bytes
+`
+	dl, ul := parseTraffic(block)
+	if dl != 9 || ul != 9 {
+		t.Fatalf("got download=%d upload=%d", dl, ul)
+	}
+}
+
+func TestParseTrafficFallsBackToDataSize(t *testing.T) {
+	block := `
+Session Name                                    | SID-alice-1
+Outgoing Data Size                              | 1,000,000 bytes
+Incoming Data Size                              | 250,000 bytes
 `
 	dl, ul := parseTraffic(block)
 	if dl != 250_000 || ul != 1_000_000 {
@@ -82,13 +94,24 @@ Outgoing Data Size                              | 1.23 GBytes
 Incoming Data Size                              | 450.5 MBytes
 `
 	dl, ul := parseTraffic(block)
-	if dl != 450_500_000 || ul != 1_230_000_000 {
-		t.Fatalf("got download=%d upload=%d", dl, ul)
+	const wantDL = 472383488 // 450.5 * 1024^2
+	const wantUL = 1320702444 // 1.23 * 1024^3 + 0.5
+	if dl != wantDL || ul != wantUL {
+		t.Fatalf("got download=%d upload=%d want download=%d upload=%d", dl, ul, wantDL, wantUL)
 	}
 }
 
 func TestParseSizeValueCommaBytes(t *testing.T) {
 	if n := parseSizeValue("1,000,000 bytes"); n != 1_000_000 {
 		t.Fatalf("got %d", n)
+	}
+}
+
+func TestParseSizeValueSoftEtherBinaryUnits(t *testing.T) {
+	if n := parseSizeValue("1 MBytes"); n != 1024*1024 {
+		t.Fatalf("MBytes got %d", n)
+	}
+	if n := parseSizeValue("1 GBytes"); n != 1024*1024*1024 {
+		t.Fatalf("GBytes got %d", n)
 	}
 }
