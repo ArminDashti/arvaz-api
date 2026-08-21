@@ -50,3 +50,5 @@ arvaz-api-linux
 
 # Runtime logs
 logs/
+
+# AUTO-IGNORE-LARGE-FILES (>5MB) â€” managed by github-commit-push-all
