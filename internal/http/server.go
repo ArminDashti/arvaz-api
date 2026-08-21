@@ -226,9 +226,13 @@ func (s *Server) getSoftEtherUsers(c *gin.Context) {
 	}
 
 	stats := map[string]store.UserStat{}
+	periods := map[string]store.UserTrafficPeriods{}
 	if s.store != nil {
 		if m, err := s.store.GetUserStatMap(c.Request.Context()); err == nil {
 			stats = m
+		}
+		if m, err := s.store.GetUserTrafficPeriodsMap(c.Request.Context()); err == nil {
+			periods = m
 		}
 	}
 
@@ -254,6 +258,12 @@ func (s *Server) getSoftEtherUsers(c *gin.Context) {
 		if row.LastIP != "" && strings.HasPrefix(row.LastIP, "172.") {
 			row.LastIP = ""
 		}
+		if p, ok := periods[u.Username]; ok {
+			row.TrafficYesterdayBytes = p.YesterdayBytes
+			row.TrafficWeekBytes = p.WeekBytes
+			row.TrafficMonthBytes = p.MonthBytes
+		}
+		row.TrafficTotalBytes = row.DownloadBytes + row.UploadBytes
 		out = append(out, row)
 	}
 	c.JSON(http.StatusOK, gin.H{"users": out})

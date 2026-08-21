@@ -32,17 +32,21 @@ type OnlineSession struct {
 }
 
 type HubUser struct {
-	Username      string `json:"username"`
-	NumLogins     int64  `json:"numLogins"`
-	LastLogin     string `json:"lastLogin"`
-	DownloadBytes uint64 `json:"downloadBytes"`
-	UploadBytes   uint64 `json:"uploadBytes"`
-	LastIP        string `json:"lastIp,omitempty"`
-	LastISP       string `json:"lastIsp,omitempty"`
-	IspLogo       string `json:"ispLogo,omitempty"`
-	GroupName     string `json:"groupName,omitempty"`
-	AuthMethod    string `json:"authMethod,omitempty"`
-	TransferBytes uint64 `json:"transferBytes,omitempty"`
+	Username               string `json:"username"`
+	NumLogins              int64  `json:"numLogins"`
+	LastLogin              string `json:"lastLogin"`
+	DownloadBytes          uint64 `json:"downloadBytes"`
+	UploadBytes            uint64 `json:"uploadBytes"`
+	LastIP                 string `json:"lastIp,omitempty"`
+	LastISP                string `json:"lastIsp,omitempty"`
+	IspLogo                string `json:"ispLogo,omitempty"`
+	GroupName              string `json:"groupName,omitempty"`
+	AuthMethod             string `json:"authMethod,omitempty"`
+	TransferBytes          uint64 `json:"transferBytes,omitempty"`
+	TrafficYesterdayBytes  uint64 `json:"trafficYesterdayBytes"`
+	TrafficWeekBytes       uint64 `json:"trafficWeekBytes"`
+	TrafficMonthBytes      uint64 `json:"trafficMonthBytes"`
+	TrafficTotalBytes      uint64 `json:"trafficTotalBytes"`
 }
 
 type Client struct {

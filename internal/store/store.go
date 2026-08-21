@@ -36,6 +36,13 @@ type UserStat struct {
 	UsageDurationSeconds int64  `json:"usageDurationSeconds"`
 }
 
+type UserTrafficPeriods struct {
+	Username       string `json:"username"`
+	YesterdayBytes uint64 `json:"yesterdayBytes"`
+	WeekBytes      uint64 `json:"weekBytes"`
+	MonthBytes     uint64 `json:"monthBytes"`
+}
+
 type SessionLog struct {
 	Username        string     `json:"username,omitempty"`
 	DownloadBytes   uint64     `json:"downloadBytes"`
@@ -232,6 +239,38 @@ func (s *Store) GetUserStatMap(ctx context.Context) (map[string]UserStat, error)
 		out[st.Username] = st
 	}
 	return out, nil
+}
+
+func (s *Store) GetUserTrafficPeriodsMap(ctx context.Context) (map[string]UserTrafficPeriods, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT
+			username,
+			COALESCE(SUM(download_bytes + upload_bytes) FILTER (
+				WHERE connected_at >= date_trunc('day', now()) - interval '1 day'
+				  AND connected_at < date_trunc('day', now())
+			), 0),
+			COALESCE(SUM(download_bytes + upload_bytes) FILTER (
+				WHERE connected_at >= now() - interval '7 days'
+			), 0),
+			COALESCE(SUM(download_bytes + upload_bytes) FILTER (
+				WHERE connected_at >= now() - interval '30 days'
+			), 0)
+		FROM softether_sessions
+		GROUP BY username
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]UserTrafficPeriods)
+	for rows.Next() {
+		var p UserTrafficPeriods
+		if err := rows.Scan(&p.Username, &p.YesterdayBytes, &p.WeekBytes, &p.MonthBytes); err != nil {
+			return nil, err
+		}
+		out[p.Username] = p
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) ListSessionsByUsername(ctx context.Context, username string) ([]SessionLog, error) {
